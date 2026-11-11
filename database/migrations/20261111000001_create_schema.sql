@@ -50,6 +50,7 @@ CREATE UNIQUE INDEX payments_one_approved_per_quote
 
 CREATE TABLE outbox (
     id             UUID PRIMARY KEY,
+    destination    TEXT        NOT NULL,
     message_type   TEXT        NOT NULL,
     group_id       TEXT        NOT NULL,
     body           JSONB       NOT NULL,

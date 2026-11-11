@@ -9,21 +9,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	TypeCreateQuote      = "billing.create-quote"
-	TypeQuoteSent        = "billing.quote-sent"
-	TypeQuoteApproved    = "billing.quote-approved"
-	TypeQuoteRejected    = "billing.quote-rejected"
-	TypeRequestPayment   = "billing.request-payment"
-	TypePaymentRequested = "billing.payment-requested"
-	TypePaymentConfirmed = "billing.payment-confirmed"
-	TypePaymentFailed    = "billing.payment-failed"
-	TypeRefundPayment    = "billing.refund-payment"
-	TypePaymentRefunded  = "billing.payment-refunded"
-	TypeCancelQuote      = "billing.cancel-quote"
-	TypeQuoteCanceled    = "billing.quote-canceled"
-)
-
 var ErrInvalidEnvelope = errors.New("invalid envelope")
 
 type Envelope struct {
@@ -49,18 +34,21 @@ func New(messageType string, cause Envelope, payload any) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("generate message id: %w", err)
 	}
 
-	causation := cause.MessageID
-	return Envelope{
+	env := Envelope{
 		MessageID:     id,
 		Type:          messageType,
 		Version:       1,
 		SagaID:        cause.SagaID,
 		WorkOrderID:   cause.WorkOrderID,
 		CorrelationID: cause.CorrelationID,
-		CausationID:   &causation,
 		OccurredAt:    time.Now().UTC(),
 		Payload:       body,
-	}, nil
+	}
+	if cause.MessageID != uuid.Nil {
+		causation := cause.MessageID
+		env.CausationID = &causation
+	}
+	return env, nil
 }
 
 func Decode(raw []byte) (Envelope, error) {
