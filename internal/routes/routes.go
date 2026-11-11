@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/docs"
+	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/routes/middlewares"
 	"github.com/gofiber/fiber/v3"
 )
 
@@ -14,9 +15,19 @@ type DatabasePinger interface {
 	Ping(context.Context) error
 }
 
-func Register(app *fiber.App, db DatabasePinger) {
-	registerHealth(app, db)
-	registerSwagger(app.Group(Prefix))
+type Deps struct {
+	DB           DatabasePinger
+	Billing      Billing
+	JWTSecretKey string
+}
+
+func Register(app *fiber.App, deps Deps) {
+	registerHealth(app, deps.DB)
+
+	group := app.Group(Prefix)
+	registerSwagger(group)
+	registerBilling(group, deps.Billing, middlewares.Auth(deps.JWTSecretKey),
+		middlewares.RequireRoles(middlewares.RoleAdmin, middlewares.RoleEmployee))
 }
 
 func registerHealth(app *fiber.App, db DatabasePinger) {

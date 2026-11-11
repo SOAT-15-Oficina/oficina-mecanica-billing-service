@@ -51,7 +51,7 @@ func serve(cfg *config.Config) {
 	defer db.Close()
 
 	app := fiber.New()
-	routes.Register(app, db)
+	routes.Register(app, routes.Deps{DB: db})
 
 	if err := app.Listen(":" + cfg.Server.Port); err != nil {
 		exit(err, "failed to start server")

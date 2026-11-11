@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Oficina Mecanica - Billing Service
-  version: 0.1.0
+  version: 0.2.0
   description: Orcamentos, decisao do cliente e cobranca via Mercado Pago.
   license:
     name: MIT
@@ -15,6 +15,12 @@ tags:
     description: Sondas de liveness e readiness
   - name: docs
     description: Contrato e Swagger UI
+  - name: quotes
+    description: Consulta de orcamentos pelo operador
+  - name: public
+    description: Links publicos enviados ao cliente por e-mail
+  - name: webhooks
+    description: Notificacoes do Mercado Pago
 paths:
   /ping:
     get:
@@ -67,7 +73,389 @@ paths:
             text/html:
               schema:
                 type: string
+  /billing/quotes/by-work-order/{workOrderId}:
+    get:
+      operationId: getQuoteByWorkOrder
+      tags: [quotes]
+      summary: Orcamento da OS com itens, decisoes e pagamentos
+      parameters:
+        - $ref: "#/components/parameters/WorkOrderId"
+      responses:
+        "200":
+          description: Orcamento completo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Quote"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /billing/public/quotes/{quoteId}:
+    get:
+      operationId: getPublicQuote
+      security: []
+      tags: [public]
+      summary: Resumo do orcamento para o cliente
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+      responses:
+        "200":
+          description: Resumo sem dados de contato
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicQuote"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /billing/public/quotes/{quoteId}/items/{workOrderServiceId}/approve:
+    get:
+      operationId: approveQuoteItem
+      security: []
+      tags: [public]
+      summary: Aprova um item do orcamento
+      description: Link GET enviado por e-mail. Quando o ultimo item pendente e decidido, publica billing.quote-approved ou billing.quote-rejected.
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+        - $ref: "#/components/parameters/WorkOrderServiceId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Decision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /billing/public/quotes/{quoteId}/items/{workOrderServiceId}/reject:
+    get:
+      operationId: rejectQuoteItem
+      security: []
+      tags: [public]
+      summary: Reprova um item do orcamento
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+        - $ref: "#/components/parameters/WorkOrderServiceId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Decision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /billing/public/quotes/{quoteId}/approve-all:
+    get:
+      operationId: approveAllQuoteItems
+      security: []
+      tags: [public]
+      summary: Aprova todos os itens pendentes
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Decision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /billing/public/quotes/{quoteId}/reject-all:
+    get:
+      operationId: rejectAllQuoteItems
+      security: []
+      tags: [public]
+      summary: Reprova todos os itens pendentes
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Decision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /billing/webhooks/mercadopago:
+    post:
+      operationId: mercadoPagoWebhook
+      security: []
+      tags: [webhooks]
+      summary: Notificacao de pagamento do Mercado Pago
+      description: >-
+        Valida x-signature (HMAC-SHA256 de "id:<data.id>;request-id:<x-request-id>;ts:<ts>;"),
+        ignora o corpo e consulta GET /v1/payments/{id}. approved publica billing.payment-confirmed;
+        rejected e cancelled publicam billing.payment-failed. Repeticoes sao ignoradas.
+      parameters:
+        - name: data.id
+          in: query
+          required: true
+          description: Identificador do pagamento no Mercado Pago
+          schema:
+            type: string
+        - name: type
+          in: query
+          required: true
+          description: Tipo da notificacao; apenas payment e tratado
+          schema:
+            type: string
+            example: payment
+        - name: x-signature
+          in: header
+          required: true
+          description: ts=<timestamp>,v1=<hmac hex>
+          schema:
+            type: string
+        - name: x-request-id
+          in: header
+          required: true
+          description: Identificador da notificacao, parte do manifesto assinado
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Notificacao aceita (processada ou ignorada)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        "401":
+          description: Assinatura invalida
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Falha ao consultar o pagamento; o Mercado Pago reenvia
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
+  parameters:
+    WorkOrderId:
+      name: workOrderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    QuoteId:
+      name: quoteId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WorkOrderServiceId:
+      name: workOrderServiceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Decision:
+      description: Decisao registrada
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+              quote:
+                $ref: "#/components/schemas/PublicQuote"
+    BadRequest:
+      description: Identificador invalido
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Token ausente ou invalido
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Papel sem permissao
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Orcamento ou item inexistente
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Item ja decidido ou orcamento fechado (aprovado, reprovado ou cancelado)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    QuoteItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        work_order_service_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        price_cents:
+          type: integer
+        estimated_time_minutes:
+          type: integer
+        decision:
+          type: string
+          enum: [PENDENTE, APROVADO, REPROVADO]
+        decided_at:
+          type: string
+          format: date-time
+    Payment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDENTE, APROVADO, RECUSADO, EXPIRADO, ESTORNADO]
+        amount_cents:
+          type: integer
+        preference_id:
+          type: string
+        checkout_url:
+          type: string
+        provider_payment_id:
+          type: string
+        provider_refund_id:
+          type: string
+        failure_reason:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        confirmed_at:
+          type: string
+          format: date-time
+        refunded_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    QuoteStatus:
+      type: string
+      enum: [ENVIADO, APROVADO, REPROVADO, CANCELADO]
+    PublicQuote:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        work_order_code:
+          type: string
+        customer_name:
+          type: string
+        status:
+          $ref: "#/components/schemas/QuoteStatus"
+        total_cents:
+          type: integer
+        approved_total_cents:
+          type: integer
+        supply_shortage:
+          type: boolean
+        sent_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuoteItem"
+        payment_url:
+          type: string
+          description: Link do Mercado Pago enquanto houver pagamento pendente
+    Quote:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        work_order_id:
+          type: string
+          format: uuid
+        saga_id:
+          type: string
+          format: uuid
+        work_order_code:
+          type: string
+        customer_name:
+          type: string
+        customer_email:
+          type: string
+        status:
+          $ref: "#/components/schemas/QuoteStatus"
+        total_cents:
+          type: integer
+        approved_total_cents:
+          type: integer
+        supply_shortage:
+          type: boolean
+        sent_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuoteItem"
+        payments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Payment"
   securitySchemes:
     bearerAuth:
       type: http
