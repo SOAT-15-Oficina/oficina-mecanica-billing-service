@@ -1,0 +1,75 @@
+openapi: 3.0.3
+info:
+  title: Oficina Mecanica - Billing Service
+  version: 0.1.0
+  description: Orcamentos, decisao do cliente e cobranca via Mercado Pago.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+tags:
+  - name: health
+    description: Sondas de liveness e readiness
+  - name: docs
+    description: Contrato e Swagger UI
+paths:
+  /ping:
+    get:
+      operationId: ping
+      security: []
+      tags: [health]
+      summary: Liveness
+      responses:
+        "200":
+          description: Processo vivo
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Pong
+  /ready:
+    get:
+      operationId: ready
+      security: []
+      tags: [health]
+      summary: Readiness
+      responses:
+        "200":
+          description: Banco acessivel
+        "503":
+          description: Banco indisponivel
+  /billing/docs/swagger.yaml:
+    get:
+      operationId: getOpenAPI
+      security: []
+      tags: [docs]
+      summary: Contrato OpenAPI deste servico
+      responses:
+        "200":
+          description: Contrato em YAML
+          content:
+            text/yaml:
+              schema:
+                type: string
+  /billing/swagger:
+    get:
+      operationId: getSwaggerUI
+      security: []
+      tags: [docs]
+      summary: Swagger UI
+      responses:
+        "200":
+          description: Pagina HTML
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

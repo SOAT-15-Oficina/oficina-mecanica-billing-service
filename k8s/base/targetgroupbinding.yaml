@@ -1,0 +1,10 @@
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: billing-service
+spec:
+  serviceRef:
+    name: billing-service
+    port: 8080
+  targetGroupARN: TARGET_GROUP_ARN
+  targetType: ip
