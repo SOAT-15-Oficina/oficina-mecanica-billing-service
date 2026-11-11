@@ -49,7 +49,6 @@ resource "aws_secretsmanager_secret_version" "billing" {
   secret_id = aws_secretsmanager_secret.billing.id
   secret_string = jsonencode({
     DATABASE_PASSWORD          = random_password.db.result
-    JWT_SECRET_KEY             = "CHANGE_ME"
     MERCADOPAGO_ACCESS_TOKEN   = "CHANGE_ME"
     MERCADOPAGO_WEBHOOK_SECRET = "CHANGE_ME"
     SES_SENDER_EMAIL           = "CHANGE_ME"

@@ -271,7 +271,11 @@ jobs:
       - name: Sync secrets
         run: |
           aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text \
-            | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/secrets.env
+            | jq -r 'to_entries[] | select(.key != "JWT_SECRET_KEY") | "\(.key)=\(.value)"' > /tmp/secrets.env
+          JWT_SECRET_ARN="$(aws ssm get-parameter --name "${SSM_PREFIX}/jwt_secret_arn" --query Parameter.Value --output text)"
+          JWT_SECRET_KEY="$(aws secretsmanager get-secret-value --secret-id "$JWT_SECRET_ARN" --query SecretString --output text)"
+          echo "::add-mask::$JWT_SECRET_KEY"
+          echo "JWT_SECRET_KEY=$JWT_SECRET_KEY" >> /tmp/secrets.env
           kubectl -n "$KUBE_NAMESPACE" create secret generic "${SERVICE%-service}-secrets" \
             --from-env-file=/tmp/secrets.env --dry-run=client -o yaml | kubectl apply -f -
           rm -f /tmp/secrets.env
