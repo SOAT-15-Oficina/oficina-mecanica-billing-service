@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Seu orçamento</title>
+  </head>
+  <body style="font-family: Arial, Helvetica, sans-serif; color: #333333; background-color: #f4f4f7; margin: 0; padding: 24px">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; padding: 32px">
+      <h1 style="font-size: 22px; margin: 0 0 16px 0">Seu orçamento está pronto</h1>
+      <p>Olá, <strong>{{.CustomerName}}</strong>.</p>
+      <p>
+        O orçamento da ordem de serviço <strong>{{.WorkOrderCode}}</strong> está disponível.
+        Aprove ou reprove cada serviço, ou decida todos de uma vez.
+      </p>
+      {{if .SupplyShortage}}
+      <p style="color: #b45309">Alguns insumos precisam ser comprados; o prazo de execução pode ser maior.</p>
+      {{end}}
+      <table role="presentation" width="100%" cellpadding="8" cellspacing="0" style="border-collapse: collapse; margin: 16px 0">
+        <tr style="background-color: #f9fafb; text-align: left">
+          <th>Serviço</th>
+          <th>Valor</th>
+          <th>Tempo estimado</th>
+          <th></th>
+        </tr>
+        {{range .Items}}
+        <tr style="border-top: 1px solid #e5e7eb">
+          <td>{{.Title}}</td>
+          <td>{{.Amount}}</td>
+          <td>{{.Estimated}}</td>
+          <td>
+            <a href="{{.ApproveLink}}" style="color: #15803d">Aprovar</a>
+            &nbsp;|&nbsp;
+            <a href="{{.RejectLink}}" style="color: #b91c1c">Reprovar</a>
+          </td>
+        </tr>
+        {{end}}
+      </table>
+      <p style="font-size: 16px">Total: <strong>{{.Total}}</strong></p>
+      <p>
+        <a href="{{.ApproveAllLink}}" style="display: inline-block; background-color: #15803d; color: #ffffff; padding: 12px 20px; border-radius: 6px; text-decoration: none">Aprovar todos</a>
+        <a href="{{.RejectAllLink}}" style="display: inline-block; background-color: #b91c1c; color: #ffffff; padding: 12px 20px; border-radius: 6px; text-decoration: none">Reprovar todos</a>
+      </p>
+      <p style="font-size: 13px; color: #6b7280">Consulte o orçamento a qualquer momento em <a href="{{.QuoteLink}}">{{.QuoteLink}}</a>.</p>
+    </div>
+  </body>
+</html>
