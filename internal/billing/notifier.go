@@ -28,6 +28,10 @@ func (l Links) All(quoteID uuid.UUID, action string) string {
 	return fmt.Sprintf("%s/%s-all", l.Quote(quoteID), action)
 }
 
+func (l Links) Page(quoteID uuid.UUID) string {
+	return fmt.Sprintf("%s/aprovacao.html?quote=%s", strings.TrimSuffix(l.baseURL, "/api"), quoteID)
+}
+
 type EmailNotifier struct {
 	provider email.Provider
 	links    Links
@@ -47,7 +51,7 @@ func (n *EmailNotifier) QuoteReady(ctx context.Context, q Quote) error {
 		CustomerName:   q.CustomerName,
 		WorkOrderCode:  q.WorkOrderCode,
 		Total:          FormatBRL(q.TotalCents),
-		QuoteLink:      n.links.Quote(q.ID),
+		QuoteLink:      n.links.Page(q.ID),
 		ApproveAllLink: n.links.All(q.ID, "approve"),
 		RejectAllLink:  n.links.All(q.ID, "reject"),
 		SupplyShortage: q.SupplyShortage,

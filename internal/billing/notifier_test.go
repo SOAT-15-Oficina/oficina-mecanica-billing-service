@@ -45,6 +45,7 @@ func TestEmailNotifierSendsQuoteWithPublicLinks(t *testing.T) {
 		base + "/items/0195a000-0000-7000-8000-000000000002/reject",
 		base + "/approve-all",
 		base + "/reject-all",
+		"http://localhost:8080/aprovacao.html?quote=0195a000-0000-7000-8000-000000000001",
 		"R$ 230,50",
 		"1h30",
 	} {
