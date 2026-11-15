@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/mercadopago"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/messaging"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -151,9 +152,13 @@ func TestCustomerRejectsAll(t *testing.T) {
 
 func TestCancelQuoteExpiresPendingPayment(t *testing.T) {
 	f := newFixture(t)
-	q, _ := f.pendingPayment()
+	q, p := f.pendingPayment()
 
-	f.handle(messaging.TypeCancelQuote, messaging.CancelQuote{Reason: messaging.ReasonExpired})
+	env := f.handle(messaging.TypeCancelQuote, messaging.CancelQuote{Reason: messaging.ReasonExpired})
+	require.Len(t, f.gateway.cancels, 1)
+	assert.Equal(t, p.ProviderOrderID+"|"+uuid.NewSHA1(env.MessageID, []byte(p.ProviderOrderID)).String(), f.gateway.cancels[0])
+	require.NoError(t, f.svc.Handle(context.Background(), env))
+	assert.Len(t, f.gateway.cancels, 1)
 
 	var canceled messaging.QuoteCanceled
 	f.last(messaging.TypeQuoteCanceled, &canceled)
@@ -169,6 +174,33 @@ func TestCancelQuoteExpiresPendingPayment(t *testing.T) {
 
 	_, err = f.svc.DecideAll(context.Background(), q.ID, ItemApproved, "")
 	assert.ErrorIs(t, err, ErrConflict)
+}
+
+func TestCancelQuoteRetriesWhenOrderCannotBeCanceled(t *testing.T) {
+	f := newFixture(t)
+	f.pendingPayment()
+	f.gateway.cancelErr = errBoom
+
+	env := f.command(messaging.TypeCancelQuote, messaging.CancelQuote{})
+	assert.ErrorIs(t, f.svc.Handle(context.Background(), env), errBoom)
+	assert.False(t, f.isProcessed(env.MessageID))
+	assert.Equal(t, PaymentPending, f.payment().Status)
+
+	f.gateway.cancelErr = mercadopago.ErrNotFound
+	require.NoError(t, f.svc.Handle(context.Background(), env))
+	assert.Equal(t, PaymentExpired, f.payment().Status)
+	require.NotNil(t, f.payment().FailureReason)
+	assert.Equal(t, messaging.ReasonSagaCompensation, *f.payment().FailureReason)
+}
+
+func TestCancelQuoteSkipsSettledPayments(t *testing.T) {
+	f := newFixture(t)
+	_, p := f.pendingPayment()
+	f.settle(p.ProviderOrderID, mercadopago.OrderProcessed)
+
+	f.handle(messaging.TypeCancelQuote, messaging.CancelQuote{})
+	assert.Empty(t, f.gateway.cancels)
+	assert.Equal(t, PaymentApproved, f.payment().Status)
 }
 
 func TestCancelQuoteWithoutQuoteStillResponds(t *testing.T) {
@@ -195,6 +227,26 @@ func TestViews(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, q.ID, view.ID)
 	assert.Equal(t, "Maria", view.CustomerName)
-	assert.Equal(t, p.CheckoutURL, view.PaymentURL)
+	assert.Equal(t, p.QRCodeURL, view.PaymentURL)
 	assert.Len(t, view.Items, 2)
+	require.Len(t, view.Payments, 1)
+	assert.Equal(t, PublicPayment{
+		ID: p.ID, Status: PaymentPending, AmountCents: 15050, ProviderOrderID: p.ProviderOrderID,
+		QRCodeURL: p.QRCodeURL, QRData: p.QRData, ExpiresAt: p.ExpiresAt,
+	}, view.Payments[0])
+
+	page, err := f.svc.PaymentPage(context.Background(), p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, p, page.Payment)
+	assert.Equal(t, q.WorkOrderCode, page.WorkOrderCode)
+	assert.Equal(t, "Maria", page.CustomerName)
+
+	_, err = f.svc.PaymentPage(context.Background(), uuid.New())
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	f.settle(p.ProviderOrderID, mercadopago.OrderProcessed)
+	view, err = f.svc.PublicQuote(context.Background(), q.ID)
+	require.NoError(t, err)
+	assert.Empty(t, view.PaymentURL)
+	assert.Equal(t, PaymentApproved, view.Payments[0].Status)
 }

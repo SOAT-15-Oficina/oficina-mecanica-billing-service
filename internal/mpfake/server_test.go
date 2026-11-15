@@ -2,9 +2,12 @@ package mpfake
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +21,7 @@ import (
 const secret = "local-webhook-secret"
 
 type notification struct {
-	dataID, kind, signature, requestID string
+	dataID, kind, signature, requestID, action string
 }
 
 type receiver struct {
@@ -28,6 +31,10 @@ type receiver struct {
 }
 
 func (r *receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Action string `json:"action"`
+	}
+	_ = json.NewDecoder(req.Body).Decode(&body)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.got = append(r.got, notification{
@@ -35,175 +42,292 @@ func (r *receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		kind:      req.URL.Query().Get("type"),
 		signature: req.Header.Get("x-signature"),
 		requestID: req.Header.Get("x-request-id"),
+		action:    body.Action,
 	})
 	if r.code != 0 {
 		w.WriteHeader(r.code)
 	}
 }
 
-func setup(t *testing.T) (*Server, *httptest.Server, *mercadopago.Client, *receiver, *httptest.Server) {
+type env struct {
+	fake   *Server
+	srv    *httptest.Server
+	client *mercadopago.Client
+	recv   *receiver
+}
+
+func setup(t *testing.T, webhookPath string) env {
 	t.Helper()
 	recv := &receiver{}
 	hook := httptest.NewServer(recv)
 	t.Cleanup(hook.Close)
 
-	fake := New("http://mp.local/", secret, nil, nil)
+	webhookURL := ""
+	if webhookPath != "-" {
+		webhookURL = hook.URL + webhookPath
+	}
+	fake := New(Options{WebhookURL: webhookURL, Secret: secret})
 	srv := httptest.NewServer(fake.Handler())
 	t.Cleanup(srv.Close)
-	return fake, srv, mercadopago.NewClient(srv.URL, "TEST-token", nil), recv, hook
+	return env{fake: fake, srv: srv, client: mercadopago.NewClient(srv.URL, "TEST-token", nil), recv: recv}
 }
 
-func createPreference(t *testing.T, c *mercadopago.Client, notificationURL string, exp time.Time) mercadopago.Preference {
+func (e env) order(t *testing.T, key string) mercadopago.Order {
 	t.Helper()
-	pref, err := c.CreatePreference(context.Background(), mercadopago.PreferenceRequest{
-		Items:             []mercadopago.Item{mercadopago.NewItem("i1", "Troca de oleo", 10000), mercadopago.NewItem("i2", "Filtro", 2550)},
-		ExternalReference: "quote-1",
-		NotificationURL:   notificationURL,
-		Expires:           true,
-		ExpirationDateTo:  mercadopago.ExpirationDate(exp),
-	})
+	o, err := e.client.CreateQROrder(context.Background(), mercadopago.QROrder{
+		ExternalReference: "pay-1",
+		Description:       "OS-1",
+		ExternalPOSID:     mercadopago.DefaultPOSExternalID,
+		Expiration:        30 * time.Minute,
+		Items:             []mercadopago.QRItem{{Title: "Troca de oleo", PriceCents: 10000}, {Title: "Filtro", PriceCents: 2550}},
+	}, key)
 	require.NoError(t, err)
-	return pref
+	return o
 }
 
-func post(t *testing.T, url string) (int, string) {
+func post(t *testing.T, target, contentType, body string) (int, string) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", nil)
+	resp, err := http.Post(target, contentType, strings.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(body)
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
 }
 
-func TestApprovedPaymentNotifiesSignedWebhookAndCanBeRefunded(t *testing.T) {
-	_, srv, client, recv, hook := setup(t)
-	pref := createPreference(t, client, hook.URL+"/billing/webhooks/mercadopago", time.Now().Add(time.Hour))
-	assert.Equal(t, "http://mp.local/checkout/"+pref.ID, pref.InitPoint)
-	assert.Equal(t, pref.InitPoint, pref.SandboxInitPoint)
-
-	resp, err := http.Get(srv.URL + "/checkout/" + pref.ID)
+func get(t *testing.T, target string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(target)
 	require.NoError(t, err)
-	page, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	assert.Contains(t, string(page), "Troca de oleo")
-	assert.Contains(t, string(page), "125.50")
-	assert.Contains(t, string(page), "status=approved")
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
+}
 
-	code, body := post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=approved")
+func TestCreateOrderReturnsQRAndIsIdempotent(t *testing.T) {
+	e := setup(t, "/hook")
+	o := e.order(t, "msg-1")
+
+	assert.True(t, strings.HasPrefix(o.ID, "ORDTST"))
+	assert.Len(t, o.ID, 32)
+	assert.Equal(t, mercadopago.OrderCreated, o.Status)
+	assert.Equal(t, "125.50", o.TotalAmount)
+	assert.True(t, strings.HasPrefix(o.PaymentID(), "PAY"))
+	assert.True(t, strings.HasPrefix(o.TypeResponse.QRData, "000201010212"))
+	assert.Contains(t, o.TypeResponse.QRData, "COM.MERCADOLIBRE")
+
+	again := e.order(t, "msg-1")
+	assert.Equal(t, o.ID, again.ID)
+	assert.NotEqual(t, o.ID, e.order(t, "msg-2").ID)
+
+	got, err := e.client.GetOrder(context.Background(), o.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pay-1", got.ExternalReference)
+}
+
+func TestPayNotifiesSignedWebhookAndCanBeRefunded(t *testing.T) {
+	e := setup(t, "/billing/webhooks/mercadopago?source=mp")
+	o := e.order(t, "msg-1")
+
+	code, body := post(t, e.srv.URL+"/__orders/"+o.ID+"/pay", "", "")
 	require.Equal(t, http.StatusOK, code)
-	assert.Contains(t, body, `"status":"approved"`)
+	assert.Contains(t, body, `"status":"processed"`)
 	assert.Contains(t, body, `"notified":true`)
 
-	require.Len(t, recv.got, 1)
-	n := recv.got[0]
-	assert.Equal(t, "payment", n.kind)
+	require.Len(t, e.recv.got, 1)
+	n := e.recv.got[0]
+	assert.Equal(t, o.ID, n.dataID)
+	assert.Equal(t, "order", n.kind)
+	assert.Equal(t, "order.processed", n.action)
 	assert.True(t, mercadopago.VerifySignature(secret, n.signature, n.dataID, n.requestID))
+	ts := strings.TrimPrefix(strings.Split(n.signature, ",")[0], "ts=")
+	assert.Equal(t, mercadopago.SignatureHeader(secret, strings.ToLower(o.ID), n.requestID, ts), n.signature)
 
-	payment, err := client.GetPayment(context.Background(), n.dataID)
+	got, err := e.client.GetOrder(context.Background(), o.ID)
 	require.NoError(t, err)
-	assert.Equal(t, mercadopago.StatusApproved, payment.Status)
-	assert.Equal(t, "quote-1", payment.ExternalReference)
-	assert.Equal(t, 125.5, payment.TransactionAmount)
+	assert.Equal(t, mercadopago.OrderProcessed, got.Status)
+	assert.Equal(t, "accredited", got.Transactions.Payments[0].StatusDetail)
 
-	first, err := client.Refund(context.Background(), n.dataID, "msg-1")
-	require.NoError(t, err)
-	again, err := client.Refund(context.Background(), n.dataID, "msg-1")
-	require.NoError(t, err)
-	assert.Equal(t, first.ID, again.ID)
+	assert.NoError(t, e.client.CancelOrder(context.Background(), o.ID, "k"))
+	code, _ = post(t, e.srv.URL+"/__orders/"+o.ID+"/expire", "", "")
+	assert.Equal(t, http.StatusConflict, code)
 
-	payment, err = client.GetPayment(context.Background(), n.dataID)
+	refunded, err := e.client.RefundOrder(context.Background(), o.ID, "msg-3")
 	require.NoError(t, err)
-	assert.Equal(t, mercadopago.StatusRefunded, payment.Status)
+	assert.Equal(t, mercadopago.OrderRefunded, refunded.Status)
+	assert.True(t, strings.HasPrefix(refunded.RefundID(), "REF"))
 
-	_, err = client.Refund(context.Background(), n.dataID, "msg-2")
-	assert.ErrorContains(t, err, "returned 400")
+	again, err := e.client.RefundOrder(context.Background(), o.ID, "msg-4")
+	require.NoError(t, err)
+	assert.Equal(t, mercadopago.OrderRefunded, again.Status)
 }
 
-func TestRejectedPaymentAndQueryStringNotificationURL(t *testing.T) {
-	_, srv, client, recv, hook := setup(t)
-	pref := createPreference(t, client, hook.URL+"/hook?source=mp", time.Now().Add(time.Hour))
+func TestExpireNotifiesAndCancelWorksOnlyOnCreated(t *testing.T) {
+	e := setup(t, "/hook")
+	o := e.order(t, "msg-1")
 
-	code, body := post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=rejected")
+	code, body := post(t, e.srv.URL+"/__orders/"+o.ID+"/expire", "", "")
 	require.Equal(t, http.StatusOK, code)
-	assert.Contains(t, body, `"status":"rejected"`)
-	require.Len(t, recv.got, 1)
-	assert.NotEmpty(t, recv.got[0].dataID)
+	assert.Contains(t, body, `"status":"expired"`)
+	require.Len(t, e.recv.got, 1)
+	assert.Equal(t, "order.expired", e.recv.got[0].action)
 
-	payment, err := client.GetPayment(context.Background(), recv.got[0].dataID)
+	other := e.order(t, "msg-2")
+	require.NoError(t, e.client.CancelOrder(context.Background(), other.ID, "k"))
+	got, err := e.client.GetOrder(context.Background(), other.ID)
 	require.NoError(t, err)
-	assert.Equal(t, mercadopago.StatusRejected, payment.Status)
+	assert.Equal(t, mercadopago.OrderCanceled, got.Status)
+	assert.Equal(t, "canceled_by_api", got.Transactions.Payments[0].StatusDetail)
+
+	_, err = e.client.RefundOrder(context.Background(), other.ID, "k")
+	assert.ErrorContains(t, err, "returned 409")
 }
 
-func TestNotificationFailuresAreReported(t *testing.T) {
-	_, srv, client, recv, hook := setup(t)
-	recv.code = http.StatusUnauthorized
+func TestOrderPageAndFormButtons(t *testing.T) {
+	e := setup(t, "/hook")
+	o := e.order(t, "msg-1")
 
-	pref := createPreference(t, client, hook.URL, time.Now().Add(time.Hour))
-	_, body := post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=approved")
-	assert.Contains(t, body, `"notified":false`)
+	code, page := get(t, e.srv.URL+"/__orders/"+o.ID)
+	require.Equal(t, http.StatusOK, code)
+	for _, want := range []string{o.ID, "Troca de oleo", "125.50", "/__orders/" + o.ID + "/pay", "/__orders/" + o.ID + "/expire"} {
+		assert.Contains(t, page, want)
+	}
 
-	pref = createPreference(t, client, "http://127.0.0.1:1/hook", time.Now().Add(time.Hour))
-	_, body = post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=approved")
-	assert.Contains(t, body, `"notified":false`)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.PostForm(e.srv.URL+"/__orders/"+o.ID+"/pay", url.Values{})
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	assert.Equal(t, "/__orders/"+o.ID, resp.Header.Get("Location"))
 
-	pref = createPreference(t, client, "http://bad host/hook", time.Now().Add(time.Hour))
-	_, body = post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=approved")
-	assert.Contains(t, body, `"notified":false`)
+	_, page = get(t, e.srv.URL+"/__orders/"+o.ID)
+	assert.Contains(t, page, "processed")
+	assert.NotContains(t, page, "Expirar")
 
-	pref = createPreference(t, client, "", time.Now().Add(time.Hour))
-	_, body = post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=approved")
-	assert.Contains(t, body, `"notified":false`)
+	code, _ = get(t, e.srv.URL+"/__orders/unknown")
+	assert.Equal(t, http.StatusNotFound, code)
 }
 
-func TestValidationErrors(t *testing.T) {
-	fake, srv, client, _, hook := setup(t)
+func TestWebhookFailuresAreReported(t *testing.T) {
+	for name, path := range map[string]string{"rejected": "/hook", "no url": "-"} {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t, path)
+			e.recv.code = http.StatusUnauthorized
+			o := e.order(t, "msg-1")
+			_, body := post(t, e.srv.URL+"/__orders/"+o.ID+"/pay", "", "")
+			assert.Contains(t, body, `"notified":false`)
+		})
+	}
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/checkout/preferences", strings.NewReader(`{}`))
+	for _, target := range []string{"http://127.0.0.1:1/hook", "http://bad host/hook"} {
+		fake := New(Options{WebhookURL: target, Secret: secret})
+		srv := httptest.NewServer(fake.Handler())
+		e := env{fake: fake, srv: srv, client: mercadopago.NewClient(srv.URL, "t", nil)}
+		o := e.order(t, "msg-1")
+		_, body := post(t, srv.URL+"/__orders/"+o.ID+"/pay", "", "")
+		assert.Contains(t, body, `"notified":false`)
+		srv.Close()
+	}
+}
+
+func TestOrderValidation(t *testing.T) {
+	e := setup(t, "/hook")
+	valid := mercadopago.QROrder{
+		ExternalReference: "pay-1", ExternalPOSID: mercadopago.DefaultPOSExternalID, Expiration: time.Hour,
+		Items: []mercadopago.QRItem{{Title: "x", PriceCents: 100}},
+	}.Request()
+
+	mutate := map[string]func(r *mercadopago.OrderRequest){
+		"type must be qr":         func(r *mercadopago.OrderRequest) { r.Type = "point" },
+		"unknown external_pos_id": func(r *mercadopago.OrderRequest) { r.Config.QR.ExternalPOSID = "OUTRO" },
+		"mode must be dynamic":    func(r *mercadopago.OrderRequest) { r.Config.QR.Mode = "static" },
+		"invalid external_ref":    func(r *mercadopago.OrderRequest) { r.ExternalReference = "" },
+		"single payment":          func(r *mercadopago.OrderRequest) { r.TotalAmount = "9.99" },
+		"invalid expiration_time": func(r *mercadopago.OrderRequest) { r.ExpirationTime = "PT10S" },
+	}
+	for name, fn := range mutate {
+		t.Run(name, func(t *testing.T) {
+			req := valid
+			fn(&req)
+			code, body := send(t, e.srv.URL+"/v1/orders", "k-"+name, req)
+			assert.Equal(t, http.StatusBadRequest, code)
+			assert.Contains(t, body, "invalid_order")
+		})
+	}
+
+	noExpiration := valid
+	noExpiration.ExpirationTime = ""
+	code, _ := send(t, e.srv.URL+"/v1/orders", "k-default", noExpiration)
+	assert.Equal(t, http.StatusCreated, code)
+
+	code, body := send(t, e.srv.URL+"/v1/orders", "", valid)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body, "idempotency_key_required")
+
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/v1/orders", strings.NewReader("{"))
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set("X-Idempotency-Key", "k")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
-	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	for body, want := range map[string]string{
-		`{`:            "invalid body",
-		`{"items":[]}`: "items are required",
-		`{"items":[{"title":"x","quantity":1,"unit_price":1}],"expiration_date_to":"amanha"}`: "invalid expiration_date_to",
-	} {
-		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/checkout/preferences", strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer t")
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		raw, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-		assert.Contains(t, string(raw), want)
-	}
-
-	resp, err = http.Get(srv.URL + "/checkout/unknown")
+	resp, err = http.Post(e.srv.URL+"/v1/orders", "application/json", nil)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
 
-	code, _ := post(t, srv.URL+"/checkout/unknown/pay?status=approved")
+func TestUnknownOrdersAndStateErrors(t *testing.T) {
+	e := setup(t, "/hook")
+	ctx := context.Background()
+
+	_, err := e.client.GetOrder(ctx, "ORDX")
+	assert.ErrorIs(t, err, mercadopago.ErrNotFound)
+	assert.ErrorIs(t, e.client.CancelOrder(ctx, "ORDX", "k"), mercadopago.ErrNotFound)
+	_, err = e.client.RefundOrder(ctx, "ORDX", "k")
+	assert.ErrorIs(t, err, mercadopago.ErrNotFound)
+	code, _ := post(t, e.srv.URL+"/__orders/ORDX/pay", "", "")
 	assert.Equal(t, http.StatusNotFound, code)
 
-	pref := createPreference(t, client, hook.URL, time.Now().Add(time.Hour))
-	code, _ = post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=pending")
-	assert.Equal(t, http.StatusBadRequest, code)
-
-	fake.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	code, _ = post(t, srv.URL+"/checkout/"+pref.ID+"/pay?status=approved")
-	assert.Equal(t, http.StatusGone, code)
-
-	_, err = client.GetPayment(context.Background(), "abc")
-	assert.ErrorIs(t, err, mercadopago.ErrNotFound)
-	_, err = client.GetPayment(context.Background(), "42")
-	assert.ErrorIs(t, err, mercadopago.ErrNotFound)
-	_, err = client.Refund(context.Background(), "42", "k")
-	assert.ErrorIs(t, err, mercadopago.ErrNotFound)
-
-	resp, err = http.Get(srv.URL + "/__health")
+	o := e.order(t, "msg-1")
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/v1/orders/"+o.ID+"/cancel", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	e.fake.now = func() time.Time { return time.Now().Add(time.Hour) }
+	code, _ = post(t, e.srv.URL+"/__orders/"+o.ID+"/pay", "", "")
+	assert.Equal(t, http.StatusGone, code)
+
+	code, _ = get(t, e.srv.URL+"/__health")
+	assert.Equal(t, http.StatusOK, code)
+}
+
+func TestEMVHasValidCRC(t *testing.T) {
+	sample := "00020101021243650016COM.MERCADOLIBRE02013063649e57dc5-c855-4020-98ad-f814ff91dbb15204000053039865802BR5909Test Test6009SAO PAULO62070503***6304"
+	assert.Equal(t, uint16(0x3630), crc16(sample))
+
+	qr := EMV("ORDTST1", "10.00")
+	assert.Contains(t, qr, "540510.00")
+	body, crc := qr[:len(qr)-4], qr[len(qr)-4:]
+	assert.Equal(t, fmt.Sprintf("%04X", crc16(body)), crc)
+	assert.NotContains(t, EMV("ORDTST1", ""), "5405")
+}
+
+func send(t *testing.T, target, key string, body any) (int, string) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, _ := http.NewRequest(http.MethodPost, target, strings.NewReader(string(raw)))
+	req.Header.Set("Authorization", "Bearer t")
+	if key != "" {
+		req.Header.Set("X-Idempotency-Key", key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(out)
 }

@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: Oficina Mecanica - Billing Service
-  version: 0.2.0
-  description: Orcamentos, decisao do cliente e cobranca via Mercado Pago.
+  version: 0.3.0
+  description: Orcamentos, decisao do cliente e cobranca por QR Code dinamico do Mercado Pago (Orders API).
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -19,6 +19,8 @@ tags:
     description: Consulta de orcamentos pelo operador
   - name: public
     description: Links publicos enviados ao cliente por e-mail
+  - name: payments
+    description: Pagina publica do QR Code de pagamento
   - name: webhooks
     description: Notificacoes do Mercado Pago
 paths:
@@ -185,30 +187,77 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+  /billing/public/payments/{paymentId}/qr:
+    get:
+      operationId: getPaymentQRPage
+      security: []
+      tags: [payments]
+      summary: Pagina do QR Code de pagamento
+      description: >-
+        HTML em pt-BR com o QR Code em PNG embutido, o codigo copia e cola, valor, validade e
+        situacao. Quando o pagamento nao esta PENDENTE (ou ja venceu), mostra so a situacao.
+        E o checkout_url publicado em billing.payment-requested e enviado por e-mail.
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: Pagina HTML
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /billing/public/payments/{paymentId}/qr.png:
+    get:
+      operationId: getPaymentQRImage
+      security: []
+      tags: [payments]
+      summary: Imagem PNG do QR Code de pagamento
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: QR Code gerado a partir do qr_data da order
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /billing/webhooks/mercadopago:
     post:
       operationId: mercadoPagoWebhook
       security: []
       tags: [webhooks]
-      summary: Notificacao de pagamento do Mercado Pago
+      summary: Notificacao de order do Mercado Pago
       description: >-
-        Valida x-signature (HMAC-SHA256 de "id:<data.id>;request-id:<x-request-id>;ts:<ts>;"),
-        ignora o corpo e consulta GET /v1/payments/{id}. approved publica billing.payment-confirmed;
-        rejected e cancelled publicam billing.payment-failed. Repeticoes sao ignoradas.
+        Configurado no painel do Mercado Pago (evento Order). Valida x-signature, HMAC-SHA256 de
+        "id:<data.id>;request-id:<x-request-id>;ts:<ts>;" com o id em minusculas ou como veio
+        (sem o trecho request-id quando o header falta). Ignora o corpo e consulta GET /v1/orders/{id}.
+        processed publica billing.payment-confirmed; expired publica billing.payment-failed (EXPIRADO);
+        canceled fora do Billing publica billing.payment-failed (RECUSADO); refunded so marca ESTORNADO.
+        Repeticoes e demais status respondem 200 sem efeito.
       parameters:
         - name: data.id
           in: query
           required: true
-          description: Identificador do pagamento no Mercado Pago
+          description: Identificador da order no Mercado Pago (ORD...)
           schema:
             type: string
+            example: ORDTST01M7ERPPW2WBHKKR91AB0PZ2JB
         - name: type
           in: query
           required: true
-          description: Tipo da notificacao; apenas payment e tratado
+          description: Tipo da notificacao; apenas order e tratado
           schema:
             type: string
-            example: payment
+            example: order
         - name: x-signature
           in: header
           required: true
@@ -217,8 +266,8 @@ paths:
             type: string
         - name: x-request-id
           in: header
-          required: true
-          description: Identificador da notificacao, parte do manifesto assinado
+          required: false
+          description: Identificador da notificacao, parte do manifesto assinado quando presente
           schema:
             type: string
       requestBody:
@@ -246,7 +295,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "500":
-          description: Falha ao consultar o pagamento; o Mercado Pago reenvia
+          description: Falha ao consultar a order; o Mercado Pago reenvia
           content:
             application/json:
               schema:
@@ -262,6 +311,13 @@ components:
         format: uuid
     QuoteId:
       name: quoteId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PaymentId:
+      name: paymentId
       in: path
       required: true
       schema:
@@ -305,7 +361,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
-      description: Orcamento ou item inexistente
+      description: Orcamento, item ou pagamento inexistente
       content:
         application/json:
           schema:
@@ -320,134 +376,102 @@ components:
     Error:
       type: object
       properties:
-        error:
-          type: string
+        error: {type: string}
     QuoteItem:
       type: object
       properties:
-        id:
-          type: string
-          format: uuid
-        work_order_service_id:
-          type: string
-          format: uuid
-        title:
-          type: string
-        price_cents:
-          type: integer
-        estimated_time_minutes:
-          type: integer
+        id: {type: string, format: uuid}
+        work_order_service_id: {type: string, format: uuid}
+        title: {type: string}
+        price_cents: {type: integer}
+        estimated_time_minutes: {type: integer}
         decision:
           type: string
           enum: [PENDENTE, APROVADO, REPROVADO]
-        decided_at:
-          type: string
-          format: date-time
+        decided_at: {type: string, format: date-time}
     Payment:
       type: object
       properties:
-        id:
-          type: string
-          format: uuid
+        id: {type: string, format: uuid}
         status:
           type: string
           enum: [PENDENTE, APROVADO, RECUSADO, EXPIRADO, ESTORNADO]
-        amount_cents:
-          type: integer
-        preference_id:
+        amount_cents: {type: integer}
+        provider_order_id:
           type: string
-        checkout_url:
+          description: Id da order QR no Mercado Pago (ORD...)
+        qr_code_url:
           type: string
+          description: Pagina publica do QR Code; a imagem fica em qr_code_url + ".png"
+        qr_data:
+          type: string
+          description: Codigo EMV do QR (copia e cola)
         provider_payment_id:
           type: string
-        provider_refund_id:
+          description: Id da transacao (PAY...) depois de confirmado
+        provider_refund_id: {type: string}
+        failure_reason: {type: string}
+        expires_at: {type: string, format: date-time}
+        confirmed_at: {type: string, format: date-time}
+        refunded_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+    PublicPayment:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        status:
           type: string
-        failure_reason:
-          type: string
-        expires_at:
-          type: string
-          format: date-time
-        confirmed_at:
-          type: string
-          format: date-time
-        refunded_at:
-          type: string
-          format: date-time
-        created_at:
-          type: string
-          format: date-time
+          enum: [PENDENTE, APROVADO, RECUSADO, EXPIRADO, ESTORNADO]
+        amount_cents: {type: integer}
+        provider_order_id: {type: string}
+        qr_code_url: {type: string}
+        qr_data: {type: string}
+        expires_at: {type: string, format: date-time}
     QuoteStatus:
       type: string
       enum: [ENVIADO, APROVADO, REPROVADO, CANCELADO]
     PublicQuote:
       type: object
       properties:
-        id:
-          type: string
-          format: uuid
-        work_order_code:
-          type: string
-        customer_name:
-          type: string
+        id: {type: string, format: uuid}
+        work_order_code: {type: string}
+        customer_name: {type: string}
         status:
           $ref: "#/components/schemas/QuoteStatus"
-        total_cents:
-          type: integer
-        approved_total_cents:
-          type: integer
-        supply_shortage:
-          type: boolean
-        sent_at:
-          type: string
-          format: date-time
-        decided_at:
-          type: string
-          format: date-time
+        total_cents: {type: integer}
+        approved_total_cents: {type: integer}
+        supply_shortage: {type: boolean}
+        sent_at: {type: string, format: date-time}
+        decided_at: {type: string, format: date-time}
         items:
           type: array
           items:
             $ref: "#/components/schemas/QuoteItem"
         payment_url:
           type: string
-          description: Link do Mercado Pago enquanto houver pagamento pendente
+          description: Pagina do QR Code enquanto houver pagamento pendente
+        payments:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicPayment"
     Quote:
       type: object
       properties:
-        id:
-          type: string
-          format: uuid
-        work_order_id:
-          type: string
-          format: uuid
-        saga_id:
-          type: string
-          format: uuid
-        work_order_code:
-          type: string
-        customer_name:
-          type: string
-        customer_email:
-          type: string
+        id: {type: string, format: uuid}
+        work_order_id: {type: string, format: uuid}
+        saga_id: {type: string, format: uuid}
+        work_order_code: {type: string}
+        customer_name: {type: string}
+        customer_email: {type: string}
         status:
           $ref: "#/components/schemas/QuoteStatus"
-        total_cents:
-          type: integer
-        approved_total_cents:
-          type: integer
-        supply_shortage:
-          type: boolean
-        sent_at:
-          type: string
-          format: date-time
-        decided_at:
-          type: string
-          format: date-time
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
+        total_cents: {type: integer}
+        approved_total_cents: {type: integer}
+        supply_shortage: {type: boolean}
+        sent_at: {type: string, format: date-time}
+        decided_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
         items:
           type: array
           items:
