@@ -26,6 +26,7 @@ type stubBilling struct {
 	itemID       uuid.UUID
 	correlation  string
 	notification billing.Notification
+	page         billing.PaymentPage
 }
 
 func (s *stubBilling) QuoteByWorkOrder(_ context.Context, id uuid.UUID) (billing.Quote, error) {
@@ -49,6 +50,15 @@ func (s *stubBilling) DecideAll(_ context.Context, quoteID uuid.UUID, decision, 
 func (s *stubBilling) HandleWebhook(_ context.Context, n billing.Notification) error {
 	s.notification = n
 	return s.err
+}
+
+func (s *stubBilling) PaymentPage(_ context.Context, id uuid.UUID) (billing.PaymentPage, error) {
+	if s.err != nil {
+		return billing.PaymentPage{}, s.err
+	}
+	page := s.page
+	page.Payment.ID = id
+	return page, nil
 }
 
 func newBillingApp(svc *stubBilling) *fiber.App {
@@ -178,13 +188,13 @@ func TestPublicDecisions(t *testing.T) {
 func TestMercadoPagoWebhook(t *testing.T) {
 	svc := &stubBilling{}
 	app := newBillingApp(svc)
-	path := Prefix + "/webhooks/mercadopago?data.id=123&type=payment"
+	path := Prefix + "/webhooks/mercadopago?data.id=ORDTST01&type=order"
 	headers := map[string]string{"x-signature": "ts=1,v1=ab", "x-request-id": "req-1"}
 
 	status, body := request(t, app, http.MethodPost, path, headers)
 	assert.Equal(t, fiber.StatusOK, status)
 	assert.Equal(t, "ok", body["status"])
-	assert.Equal(t, billing.Notification{DataID: "123", Type: "payment", Signature: "ts=1,v1=ab", RequestID: "req-1"}, svc.notification)
+	assert.Equal(t, billing.Notification{DataID: "ORDTST01", Type: "order", Signature: "ts=1,v1=ab", RequestID: "req-1"}, svc.notification)
 
 	svc.err = billing.ErrInvalidSignature
 	status, _ = request(t, app, http.MethodPost, path, headers)

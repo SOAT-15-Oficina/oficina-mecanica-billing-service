@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/mercadopago"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/mpfake"
 )
 
@@ -17,11 +18,18 @@ func main() {
 		healthcheck(port)
 		return
 	}
-	publicURL := env("MPFAKE_PUBLIC_URL", "http://localhost:"+port)
-	server := mpfake.New(publicURL, os.Getenv("MERCADOPAGO_WEBHOOK_SECRET"), nil, logger)
+	webhookURL := os.Getenv("MPFAKE_WEBHOOK_URL")
+	posExternalID := env("MERCADOPAGO_POS_EXTERNAL_ID", mercadopago.DefaultPOSExternalID)
+	server := mpfake.New(mpfake.Options{
+		WebhookURL:    webhookURL,
+		Secret:        os.Getenv("MERCADOPAGO_WEBHOOK_SECRET"),
+		POSExternalID: posExternalID,
+		Logger:        logger,
+	})
 
 	srv := &http.Server{Addr: ":" + port, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	logger.Info("mpfake: listening", slog.String("addr", srv.Addr), slog.String("public_url", publicURL))
+	logger.Info("mpfake: listening", slog.String("addr", srv.Addr), slog.String("webhook_url", webhookURL),
+		slog.String("pos_external_id", posExternalID))
 	if err := srv.ListenAndServe(); err != nil {
 		logger.Error("mpfake: stopped", slog.String("error", err.Error()))
 		os.Exit(1)

@@ -9,6 +9,7 @@ import (
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/messaging"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/messaging/pgoutbox"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/observability"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -38,32 +39,34 @@ func (s *Service) requestPayment(ctx context.Context, env messaging.Envelope) er
 
 	now := s.now()
 	expiresAt := now.Add(s.cfg.PaymentExpiration)
+	paymentID := uuid.NewSHA1(env.MessageID, []byte("payment"))
 	approved := q.approvedItems()
-	items := make([]mercadopago.Item, 0, len(approved))
+	items := make([]mercadopago.QRItem, 0, len(approved))
 	for _, it := range approved {
-		items = append(items, mercadopago.NewItem(it.WorkOrderServiceID.String(), it.Title, it.PriceCents))
+		items = append(items, mercadopago.QRItem{Title: it.Title, PriceCents: it.PriceCents})
 	}
-	pref, err := s.gateway.CreatePreference(ctx, mercadopago.PreferenceRequest{
+	order, err := s.gateway.CreateQROrder(ctx, mercadopago.QROrder{
+		ExternalReference: paymentID.String(),
+		Description:       "Ordem de servico " + q.WorkOrderCode,
+		ExternalPOSID:     s.cfg.POSExternalID,
+		Expiration:        s.cfg.PaymentExpiration,
 		Items:             items,
-		ExternalReference: q.ID.String(),
-		NotificationURL:   s.cfg.NotificationURL,
-		Expires:           true,
-		ExpirationDateTo:  mercadopago.ExpirationDate(expiresAt),
-	})
+	}, env.MessageID.String())
 	if err != nil {
-		logger.ErrorContext(ctx, "billing: create preference failed",
+		logger.ErrorContext(ctx, "billing: create qr order failed",
 			observability.Integration(observability.IntegrationMercadoPago), observability.Err(err))
 		return err
 	}
 
 	payment := Payment{
-		ID:           newID(),
-		Status:       PaymentPending,
-		AmountCents:  q.ApprovedTotalCents,
-		PreferenceID: pref.ID,
-		CheckoutURL:  pref.InitPoint,
-		ExpiresAt:    expiresAt,
-		CreatedAt:    now,
+		ID:              paymentID,
+		Status:          PaymentPending,
+		AmountCents:     q.ApprovedTotalCents,
+		ProviderOrderID: order.ID,
+		QRCodeURL:       s.links.PaymentQR(paymentID),
+		QRData:          order.TypeResponse.QRData,
+		ExpiresAt:       expiresAt,
+		CreatedAt:       now,
 	}
 	created := false
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
@@ -81,7 +84,7 @@ func (s *Service) requestPayment(ctx context.Context, env messaging.Envelope) er
 		return err
 	}
 
-	logger = logger.With(slog.String(observability.KeyPaymentID, payment.ID.String()))
+	logger = logger.With(slog.String(observability.KeyPaymentID, payment.ID.String()), slog.String("provider_order_id", order.ID))
 	logger.InfoContext(ctx, "billing: payment requested", observability.Event("billing.payment_requested"))
 	if err := s.notifier.PaymentReady(ctx, q, payment); err != nil {
 		logger.ErrorContext(ctx, "billing: payment email failed", observability.Event("billing.email_failed"), observability.Err(err))
@@ -90,7 +93,7 @@ func (s *Service) requestPayment(ctx context.Context, env messaging.Envelope) er
 }
 
 func paymentRequested(p Payment) messaging.PaymentRequested {
-	return messaging.PaymentRequested{PaymentID: p.ID, CheckoutURL: p.CheckoutURL, AmountCents: p.AmountCents, ExpiresAt: p.ExpiresAt}
+	return messaging.PaymentRequested{PaymentID: p.ID, CheckoutURL: p.QRCodeURL, AmountCents: p.AmountCents, ExpiresAt: p.ExpiresAt}
 }
 
 func (s *Service) refundPayment(ctx context.Context, env messaging.Envelope) error {
@@ -109,7 +112,7 @@ func (s *Service) refundPayment(ctx context.Context, env messaging.Envelope) err
 	}
 
 	approved := q.payment(PaymentApproved)
-	if approved == nil || approved.ProviderPaymentID == nil {
+	if approved == nil {
 		if refunded := q.payment(PaymentRefunded); refunded != nil {
 			return s.respond(ctx, env, messaging.TypePaymentRefunded, paymentRefunded(*refunded))
 		}
@@ -118,14 +121,14 @@ func (s *Service) refundPayment(ctx context.Context, env messaging.Envelope) err
 		return s.respond(ctx, env, messaging.TypePaymentRefunded, messaging.PaymentRefunded{})
 	}
 
-	refund, err := s.gateway.Refund(ctx, *approved.ProviderPaymentID, env.MessageID.String())
+	order, err := s.gateway.RefundOrder(ctx, approved.ProviderOrderID, env.MessageID.String())
 	if err != nil {
 		logger.ErrorContext(ctx, "billing: refund failed",
 			observability.Integration(observability.IntegrationMercadoPago), observability.Err(err))
 		return err
 	}
 
-	refundID := refund.ID.String()
+	refundID := order.RefundID()
 	refundedAt := s.now()
 	approved.Status = PaymentRefunded
 	approved.ProviderRefundID = &refundID

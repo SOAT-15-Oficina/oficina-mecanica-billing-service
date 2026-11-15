@@ -2,70 +2,69 @@ package mpfake
 
 import (
 	"encoding/json"
-	"fmt"
-	"html/template"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/mercadopago"
-	"github.com/google/uuid"
 )
 
-type preference struct {
-	request mercadopago.PreferenceRequest
-	id      string
-	expires time.Time
+const idAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+type Options struct {
+	WebhookURL    string
+	Secret        string
+	POSExternalID string
+	Client        *http.Client
+	Logger        *slog.Logger
 }
 
-type payment struct {
-	ID                int64   `json:"id"`
-	Status            string  `json:"status"`
-	StatusDetail      string  `json:"status_detail"`
-	ExternalReference string  `json:"external_reference"`
-	TransactionAmount float64 `json:"transaction_amount"`
-	PreferenceID      string  `json:"preference_id"`
-}
-
-type refund struct {
-	ID     int64  `json:"id"`
-	Status string `json:"status"`
+type order struct {
+	mercadopago.Order
+	expiresAt time.Time
 }
 
 type Server struct {
-	publicURL string
-	secret    string
-	client    *http.Client
-	logger    *slog.Logger
-	now       func() time.Time
+	webhookURL    string
+	secret        string
+	posExternalID string
+	client        *http.Client
+	logger        *slog.Logger
+	now           func() time.Time
 
-	mu          sync.Mutex
-	preferences map[string]*preference
-	payments    map[int64]*payment
-	refunds     map[string]refund
-	nextID      int64
+	mu        sync.Mutex
+	orders    map[string]*order
+	byKey     map[string]string
+	stores    []mercadopago.Store
+	pos       []mercadopago.POS
+	posByKey  map[string]mercadopago.POS
+	nextIDNum int64
 }
 
-func New(publicURL, secret string, client *http.Client, logger *slog.Logger) *Server {
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+func New(opts Options) *Server {
+	if opts.Client == nil {
+		opts.Client = &http.Client{Timeout: 10 * time.Second}
 	}
-	if logger == nil {
-		logger = slog.Default()
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	if opts.POSExternalID == "" {
+		opts.POSExternalID = mercadopago.DefaultPOSExternalID
 	}
 	return &Server{
-		publicURL:   strings.TrimRight(publicURL, "/"),
-		secret:      secret,
-		client:      client,
-		logger:      logger,
-		now:         time.Now,
-		preferences: map[string]*preference{},
-		payments:    map[int64]*payment{},
-		refunds:     map[string]refund{},
-		nextID:      1000000,
+		webhookURL:    opts.WebhookURL,
+		secret:        opts.Secret,
+		posExternalID: opts.POSExternalID,
+		client:        opts.Client,
+		logger:        opts.Logger,
+		now:           time.Now,
+		orders:        map[string]*order{},
+		byKey:         map[string]string{},
+		posByKey:      map[string]mercadopago.POS{},
+		nextIDNum:     80000000,
 	}
 }
 
@@ -74,215 +73,173 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /__health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /checkout/preferences", s.createPreference)
-	mux.HandleFunc("GET /checkout/{id}", s.checkoutPage)
-	mux.HandleFunc("POST /checkout/{id}/pay", s.pay)
-	mux.HandleFunc("GET /v1/payments/{id}", s.getPayment)
-	mux.HandleFunc("POST /v1/payments/{id}/refunds", s.refund)
+	mux.HandleFunc("POST /v1/orders", s.authorized(s.createOrder))
+	mux.HandleFunc("GET /v1/orders/{id}", s.authorized(s.getOrder))
+	mux.HandleFunc("POST /v1/orders/{id}/cancel", s.authorized(s.cancelOrder))
+	mux.HandleFunc("POST /v1/orders/{id}/refund", s.authorized(s.refundOrder))
+	mux.HandleFunc("GET /__orders/{id}", s.orderPage)
+	mux.HandleFunc("POST /__orders/{id}/pay", s.pay)
+	mux.HandleFunc("POST /__orders/{id}/expire", s.expire)
+	mux.HandleFunc("GET /users/me", s.authorized(s.me))
+	mux.HandleFunc("GET /users/{userID}/stores/search", s.authorized(s.searchStores))
+	mux.HandleFunc("POST /users/{userID}/stores", s.authorized(s.createStore))
+	mux.HandleFunc("GET /pos", s.authorized(s.searchPOS))
+	mux.HandleFunc("POST /v2/pos", s.authorized(s.createPOS))
 	return mux
 }
 
-func (s *Server) createPreference(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		writeError(w, http.StatusUnauthorized, "missing bearer token")
-		return
-	}
-	var req mercadopago.PreferenceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body")
-		return
-	}
-	if len(req.Items) == 0 {
-		writeError(w, http.StatusBadRequest, "items are required")
-		return
-	}
-
-	pref := &preference{request: req, id: uuid.NewString()}
-	if req.ExpirationDateTo != "" {
-		exp, err := time.Parse(mercadopago.DateLayout, req.ExpirationDateTo)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid expiration_date_to")
+func (s *Server) authorized(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 			return
 		}
-		pref.expires = exp
+		next(w, r)
 	}
-
-	s.mu.Lock()
-	s.preferences[pref.id] = pref
-	s.mu.Unlock()
-
-	link := s.publicURL + "/checkout/" + pref.id
-	writeJSON(w, http.StatusCreated, mercadopago.Preference{ID: pref.id, InitPoint: link, SandboxInitPoint: link})
 }
 
-var checkoutPage = template.Must(template.New("checkout").Parse(`<!doctype html>
-<html lang="pt-BR">
-<head><meta charset="UTF-8"><title>Mercado Pago (fake)</title></head>
-<body style="font-family: Arial, Helvetica, sans-serif; max-width: 480px; margin: 40px auto">
-  <h1>Mercado Pago (fake)</h1>
-  <p>Pedido {{.Reference}}</p>
-  <ul>{{range .Items}}<li>{{.Title}}: R$ {{printf "%.2f" .UnitPrice}}</li>{{end}}</ul>
-  <p><strong>Total: R$ {{printf "%.2f" .Total}}</strong></p>
-  <form method="post" action="/checkout/{{.ID}}/pay?status=approved" style="display:inline"><button type="submit">Pagar</button></form>
-  <form method="post" action="/checkout/{{.ID}}/pay?status=rejected" style="display:inline"><button type="submit">Recusar</button></form>
-</body>
-</html>`))
-
-func (s *Server) checkoutPage(w http.ResponseWriter, r *http.Request) {
-	pref, ok := s.preference(r.PathValue("id"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "preference not found")
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = checkoutPage.Execute(w, map[string]any{
-		"ID":        pref.id,
-		"Reference": pref.request.ExternalReference,
-		"Items":     pref.request.Items,
-		"Total":     total(pref.request.Items),
-	})
-}
-
-func (s *Server) pay(w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
-	if status != mercadopago.StatusApproved && status != mercadopago.StatusRejected {
-		writeError(w, http.StatusBadRequest, "status must be approved or rejected")
-		return
-	}
-	pref, ok := s.preference(r.PathValue("id"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "preference not found")
-		return
-	}
-	if !pref.expires.IsZero() && s.now().After(pref.expires) {
-		writeError(w, http.StatusGone, "preference expired")
-		return
-	}
-
-	s.mu.Lock()
-	s.nextID++
-	p := &payment{
-		ID:                s.nextID,
-		Status:            status,
-		StatusDetail:      detail(status),
-		ExternalReference: pref.request.ExternalReference,
-		TransactionAmount: total(pref.request.Items),
-		PreferenceID:      pref.id,
-	}
-	s.payments[p.ID] = p
-	s.mu.Unlock()
-
-	notified := s.notify(r, pref.request.NotificationURL, p.ID)
-	writeJSON(w, http.StatusOK, map[string]any{"payment_id": p.ID, "status": p.Status, "notified": notified})
-}
-
-func (s *Server) notify(r *http.Request, notificationURL string, paymentID int64) bool {
-	if notificationURL == "" {
-		return false
-	}
-	dataID := strconv.FormatInt(paymentID, 10)
-	requestID := uuid.NewString()
-	ts := strconv.FormatInt(s.now().UnixMilli(), 10)
-
-	sep := "?"
-	if strings.Contains(notificationURL, "?") {
-		sep = "&"
-	}
-	target := notificationURL + sep + "data.id=" + dataID + "&type=payment"
-	body := fmt.Sprintf(`{"action":"payment.updated","type":"payment","data":{"id":%q}}`, dataID)
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, strings.NewReader(body))
-	if err != nil {
-		s.logger.Error("mpfake: invalid notification url", slog.String("error", err.Error()))
-		return false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-request-id", requestID)
-	req.Header.Set("x-signature", mercadopago.SignatureHeader(s.secret, dataID, requestID, ts))
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		s.logger.Error("mpfake: notification failed", slog.String("error", err.Error()))
-		return false
-	}
-	defer resp.Body.Close()
-	s.logger.Info("mpfake: notification delivered", slog.Int("status", resp.StatusCode), slog.String("payment_id", dataID))
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
-}
-
-func (s *Server) getPayment(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.payment(r.PathValue("id"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "payment not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, p)
-}
-
-func (s *Server) refund(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 	key := r.Header.Get("X-Idempotency-Key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "idempotency_key_required", "X-Idempotency-Key is required")
+		return
+	}
+	var req mercadopago.OrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid body")
+		return
+	}
+	expiration, problem := s.validate(req)
+	if problem != "" {
+		writeError(w, http.StatusBadRequest, "invalid_order", problem)
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if previous, ok := s.refunds[key]; ok && key != "" {
-		writeJSON(w, http.StatusCreated, previous)
+	if id, ok := s.byKey[key]; ok {
+		writeJSON(w, http.StatusCreated, s.orders[id].Order)
 		return
 	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	p, ok := s.payments[id]
-	if err != nil || !ok {
-		writeError(w, http.StatusNotFound, "payment not found")
-		return
-	}
-	if p.Status != mercadopago.StatusApproved {
-		writeError(w, http.StatusBadRequest, "payment is not refundable")
-		return
-	}
-
-	s.nextID++
-	out := refund{ID: s.nextID, Status: mercadopago.StatusApproved}
-	p.Status = mercadopago.StatusRefunded
-	p.StatusDetail = "refunded"
-	if key != "" {
-		s.refunds[key] = out
-	}
-	writeJSON(w, http.StatusCreated, out)
+	o := &order{expiresAt: s.now().Add(expiration), Order: mercadopago.Order{
+		ID:                "ORDTST" + randomID(26),
+		Type:              req.Type,
+		Status:            mercadopago.OrderCreated,
+		StatusDetail:      "created",
+		ExternalReference: req.ExternalReference,
+		Description:       req.Description,
+		TotalAmount:       req.TotalAmount,
+		ExpirationTime:    req.ExpirationTime,
+		Config:            req.Config,
+		Items:             req.Items,
+		Transactions: mercadopago.Transactions{Payments: []mercadopago.OrderPayment{{
+			ID: "PAY" + randomID(26), Amount: req.TotalAmount, Status: "created", StatusDetail: "ready_to_process",
+		}}},
+	}}
+	o.TypeResponse.QRData = EMV(o.ID, req.TotalAmount)
+	s.orders[o.ID] = o
+	s.byKey[key] = o.ID
+	s.logger.Info("mpfake: order created", slog.String("order_id", o.ID), slog.String("external_reference", o.ExternalReference))
+	writeJSON(w, http.StatusCreated, o.Order)
 }
 
-func (s *Server) preference(id string) (*preference, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	pref, ok := s.preferences[id]
-	return pref, ok
+func (s *Server) validate(req mercadopago.OrderRequest) (time.Duration, string) {
+	if req.Type != mercadopago.OrderTypeQR {
+		return 0, "type must be qr"
+	}
+	if req.Config.QR.ExternalPOSID != s.posExternalID {
+		return 0, "unknown external_pos_id"
+	}
+	if req.Config.QR.Mode != mercadopago.QRModeDynamic {
+		return 0, "mode must be dynamic"
+	}
+	if req.ExternalReference == "" || len(req.ExternalReference) > 64 {
+		return 0, "invalid external_reference"
+	}
+	if len(req.Items) == 0 || len(req.Transactions.Payments) != 1 || req.Transactions.Payments[0].Amount != req.TotalAmount {
+		return 0, "items and a single payment matching total_amount are required"
+	}
+	if req.ExpirationTime == "" {
+		return 15 * time.Minute, ""
+	}
+	d, err := mercadopago.ParseISODuration(req.ExpirationTime)
+	if err != nil || d < 30*time.Second || d > 3600*time.Hour {
+		return 0, "invalid expiration_time"
+	}
+	return d, ""
 }
 
-func (s *Server) payment(raw string) (payment, bool) {
-	id, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return payment{}, false
-	}
+func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.payments[id]
+	o, ok := s.orders[r.PathValue("id")]
 	if !ok {
-		return payment{}, false
+		writeError(w, http.StatusNotFound, "order_not_found", "order not found")
+		return
 	}
-	return *p, true
+	writeJSON(w, http.StatusOK, o.Order)
 }
 
-func total(items []mercadopago.Item) float64 {
-	var sum float64
-	for _, it := range items {
-		sum += it.UnitPrice * float64(it.Quantity)
-	}
-	return sum
+func (s *Server) cancelOrder(w http.ResponseWriter, r *http.Request) {
+	s.transition(w, r, mercadopago.OrderCreated, func(o *order) {
+		o.Status, o.StatusDetail = mercadopago.OrderCanceled, "canceled"
+		o.setPayment("canceled", "canceled_by_api")
+	}, "order_not_cancelable")
 }
 
-func detail(status string) string {
-	if status == mercadopago.StatusApproved {
-		return "accredited"
+func (s *Server) refundOrder(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	o, ok := s.orders[r.PathValue("id")]
+	refunded := ok && o.Status == mercadopago.OrderRefunded
+	s.mu.Unlock()
+	if refunded {
+		writeError(w, http.StatusConflict, "order_already_refunded", "order already refunded")
+		return
 	}
-	return "cc_rejected_other_reason"
+	s.transition(w, r, mercadopago.OrderProcessed, func(o *order) {
+		o.Status, o.StatusDetail = mercadopago.OrderRefunded, "refunded"
+		o.setPayment("refunded", "refunded")
+		o.Transactions.Refunds = []mercadopago.OrderRefund{{ID: "REF" + randomID(26), Amount: o.TotalAmount, Status: "processed"}}
+	}, "order_not_refundable")
+}
+
+func (s *Server) transition(w http.ResponseWriter, r *http.Request, from string, apply func(*order), conflict string) {
+	if r.Header.Get("X-Idempotency-Key") == "" {
+		writeError(w, http.StatusBadRequest, "idempotency_key_required", "X-Idempotency-Key is required")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orders[r.PathValue("id")]
+	if !ok {
+		writeError(w, http.StatusNotFound, "order_not_found", "order not found")
+		return
+	}
+	if o.Status != from {
+		writeError(w, http.StatusConflict, conflict, "order is "+o.Status)
+		return
+	}
+	apply(o)
+	status := http.StatusOK
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/refund") {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, o.Order)
+}
+
+func (o *order) setPayment(status, detail string) {
+	for i := range o.Transactions.Payments {
+		o.Transactions.Payments[i].Status = status
+		o.Transactions.Payments[i].StatusDetail = detail
+	}
+}
+
+func randomID(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = idAlphabet[rand.IntN(len(idAlphabet))]
+	}
+	return string(b)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -291,6 +248,9 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{"status": status, "message": message})
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"status": status, "message": message,
+		"errors": []map[string]string{{"code": code, "message": message}},
+	})
 }

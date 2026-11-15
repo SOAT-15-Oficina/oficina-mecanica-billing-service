@@ -24,7 +24,7 @@ type DB interface {
 const quoteColumns = `id, work_order_id, saga_id, work_order_code, customer_name, customer_email, status,
 	total_cents, approved_total_cents, has_supply_shortage, sent_at, decided_at, created_at, updated_at`
 
-const paymentColumns = `id, status, amount_cents, preference_id, checkout_url, provider_payment_id,
+const paymentColumns = `id, status, amount_cents, provider_order_id, checkout_url, qr_data, provider_payment_id,
 	provider_refund_id, failure_reason, expires_at, confirmed_at, refunded_at, created_at`
 
 func loadQuote(ctx context.Context, db querier, column string, value uuid.UUID, forUpdate bool) (Quote, error) {
@@ -88,20 +88,36 @@ func loadItems(ctx context.Context, db querier, quoteID uuid.UUID) ([]Item, erro
 
 func loadPayments(ctx context.Context, db querier, quoteID uuid.UUID) ([]Payment, error) {
 	rows, err := db.Query(ctx,
-		`SELECT `+paymentColumns+` FROM payments WHERE quote_id = $1 ORDER BY created_at DESC, id DESC`, quoteID)
+		`SELECT `+paymentColumns+` FROM payments WHERE quote_id = $1 ORDER BY created_at, id`, quoteID)
 	if err != nil {
 		return nil, fmt.Errorf("load payments: %w", err)
 	}
 	payments, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Payment, error) {
-		var p Payment
-		err := row.Scan(&p.ID, &p.Status, &p.AmountCents, &p.PreferenceID, &p.CheckoutURL, &p.ProviderPaymentID,
-			&p.ProviderRefundID, &p.FailureReason, &p.ExpiresAt, &p.ConfirmedAt, &p.RefundedAt, &p.CreatedAt)
-		return p, err
+		return scanPayment(row)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scan payments: %w", err)
 	}
 	return payments, nil
+}
+
+func scanPayment(row pgx.Row) (Payment, error) {
+	var p Payment
+	err := row.Scan(&p.ID, &p.Status, &p.AmountCents, &p.ProviderOrderID, &p.QRCodeURL, &p.QRData, &p.ProviderPaymentID,
+		&p.ProviderRefundID, &p.FailureReason, &p.ExpiresAt, &p.ConfirmedAt, &p.RefundedAt, &p.CreatedAt)
+	return p, err
+}
+
+func paymentQuoteID(ctx context.Context, db querier, column, value string) (uuid.UUID, error) {
+	var quoteID uuid.UUID
+	err := db.QueryRow(ctx, `SELECT quote_id FROM payments WHERE `+column+` = $1`, value).Scan(&quoteID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("find payment: %w", err)
+	}
+	return quoteID, nil
 }
 
 func insertQuote(ctx context.Context, db querier, q Quote) error {
@@ -128,9 +144,9 @@ func insertQuote(ctx context.Context, db querier, q Quote) error {
 
 func insertPayment(ctx context.Context, db querier, quoteID uuid.UUID, p Payment) error {
 	if _, err := db.Exec(ctx,
-		`INSERT INTO payments (id, quote_id, status, amount_cents, preference_id, checkout_url, expires_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
-		p.ID, quoteID, p.Status, p.AmountCents, p.PreferenceID, p.CheckoutURL, p.ExpiresAt, p.CreatedAt,
+		`INSERT INTO payments (id, quote_id, status, amount_cents, provider_order_id, checkout_url, qr_data, expires_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
+		p.ID, quoteID, p.Status, p.AmountCents, p.ProviderOrderID, p.QRCodeURL, p.QRData, p.ExpiresAt, p.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("insert payment: %w", err)
 	}

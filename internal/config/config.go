@@ -39,7 +39,7 @@ type MercadoPagoConfig struct {
 	BaseURL           string
 	AccessToken       string
 	WebhookSecret     string
-	NotificationURL   string
+	POSExternalID     string
 	PaymentExpiration time.Duration
 }
 
@@ -73,15 +73,12 @@ func Load() (*Config, error) {
 	v.SetDefault("MESSAGING_POLL_WAIT", "20s")
 	v.SetDefault("OUTBOX_POLL_INTERVAL", "500ms")
 	v.SetDefault("MERCADOPAGO_BASE_URL", "https://api.mercadopago.com")
+	v.SetDefault("MERCADOPAGO_POS_EXTERNAL_ID", "OFICINAMATRIZPOS01")
 	v.SetDefault("PAYMENT_EXPIRATION", "48h")
 	v.SetDefault("EMAIL_PROVIDER", "mailhog")
 	v.SetDefault("EMAIL_PORT", 1025)
 
 	baseURL := strings.TrimRight(v.GetString("APP_BASE_URL"), "/")
-	notificationURL := v.GetString("MERCADOPAGO_NOTIFICATION_URL")
-	if notificationURL == "" {
-		notificationURL = baseURL + "/billing/webhooks/mercadopago"
-	}
 
 	return &Config{
 		Server: &ServerConfig{
@@ -112,7 +109,7 @@ func Load() (*Config, error) {
 			BaseURL:           strings.TrimRight(v.GetString("MERCADOPAGO_BASE_URL"), "/"),
 			AccessToken:       v.GetString("MERCADOPAGO_ACCESS_TOKEN"),
 			WebhookSecret:     v.GetString("MERCADOPAGO_WEBHOOK_SECRET"),
-			NotificationURL:   notificationURL,
+			POSExternalID:     v.GetString("MERCADOPAGO_POS_EXTERNAL_ID"),
 			PaymentExpiration: v.GetDuration("PAYMENT_EXPIRATION"),
 		},
 		Email: &EmailConfig{

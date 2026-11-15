@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,60 +25,88 @@ const (
 )
 
 type fakeGateway struct {
-	mu          sync.Mutex
-	preferences []mercadopago.PreferenceRequest
-	refunds     []string
-	payments    map[string]mercadopago.Payment
-	prefErr     error
-	paymentErr  error
-	refundErr   error
-	next        int
+	mu        sync.Mutex
+	created   []mercadopago.QROrder
+	keys      []string
+	orders    map[string]mercadopago.Order
+	cancels   []string
+	refunds   []string
+	createErr error
+	getErr    error
+	cancelErr error
+	refundErr error
 }
 
-func (g *fakeGateway) CreatePreference(_ context.Context, req mercadopago.PreferenceRequest) (mercadopago.Preference, error) {
+func (g *fakeGateway) CreateQROrder(_ context.Context, req mercadopago.QROrder, key string) (mercadopago.Order, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.prefErr != nil {
-		return mercadopago.Preference{}, g.prefErr
+	if g.createErr != nil {
+		return mercadopago.Order{}, g.createErr
 	}
-	g.preferences = append(g.preferences, req)
-	g.next++
-	id := "pref-" + uuid.NewString()
-	return mercadopago.Preference{ID: id, InitPoint: "http://mp.local/checkout/" + id}, nil
+	g.created = append(g.created, req)
+	g.keys = append(g.keys, key)
+	if g.orders == nil {
+		g.orders = map[string]mercadopago.Order{}
+	}
+	o := mercadopago.Order{
+		ID: "ORDTST" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", ""))[:26], Status: mercadopago.OrderCreated,
+		ExternalReference: req.ExternalReference,
+		Transactions:      mercadopago.Transactions{Payments: []mercadopago.OrderPayment{{ID: "PAY" + strings.ReplaceAll(uuid.NewString(), "-", "")}}},
+		TypeResponse:      mercadopago.TypeResponse{QRData: "000201-qr-" + req.ExternalReference},
+	}
+	g.orders[o.ID] = o
+	return o, nil
 }
 
-func (g *fakeGateway) GetPayment(_ context.Context, id string) (mercadopago.Payment, error) {
+func (g *fakeGateway) GetOrder(_ context.Context, id string) (mercadopago.Order, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.paymentErr != nil {
-		return mercadopago.Payment{}, g.paymentErr
+	if g.getErr != nil {
+		return mercadopago.Order{}, g.getErr
 	}
-	p, ok := g.payments[id]
+	o, ok := g.orders[id]
 	if !ok {
-		return mercadopago.Payment{}, mercadopago.ErrNotFound
+		return mercadopago.Order{}, mercadopago.ErrNotFound
 	}
-	return p, nil
+	return o, nil
 }
 
-func (g *fakeGateway) Refund(_ context.Context, paymentID, key string) (mercadopago.Refund, error) {
+func (g *fakeGateway) CancelOrder(_ context.Context, id, key string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.cancelErr != nil {
+		return g.cancelErr
+	}
+	g.cancels = append(g.cancels, id+"|"+key)
+	return nil
+}
+
+func (g *fakeGateway) RefundOrder(_ context.Context, id, key string) (mercadopago.Order, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.refundErr != nil {
-		return mercadopago.Refund{}, g.refundErr
+		return mercadopago.Order{}, g.refundErr
 	}
-	g.refunds = append(g.refunds, paymentID+"|"+key)
-	return mercadopago.Refund{ID: json.Number("777"), Status: "approved"}, nil
+	g.refunds = append(g.refunds, id+"|"+key)
+	return mercadopago.Order{ID: id, Status: mercadopago.OrderProcessed,
+		Transactions: mercadopago.Transactions{Refunds: []mercadopago.OrderRefund{{ID: "REF777", Status: "processing"}}}}, nil
 }
 
-func (g *fakeGateway) addPayment(status, externalReference string) string {
+func (g *fakeGateway) paymentID(orderID string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.payments == nil {
-		g.payments = map[string]mercadopago.Payment{}
+	return g.orders[orderID].PaymentID()
+}
+
+func (g *fakeGateway) setStatus(id, status string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	o := g.orders[id]
+	o.Status = status
+	if status == mercadopago.OrderRefunded {
+		o.Transactions.Refunds = []mercadopago.OrderRefund{{ID: "REF-WEBHOOK"}}
 	}
-	id := strconv.FormatInt(time.Now().UnixNano(), 10)
-	g.payments[id] = mercadopago.Payment{ID: json.Number(id), Status: status, ExternalReference: externalReference}
-	return id
+	g.orders[id] = o
 }
 
 type fakeNotifier struct {
@@ -138,7 +166,8 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.svc = NewService(db, f.gateway, f.notifier, Config{
 		EventsTopic:       topic,
-		NotificationURL:   "http://billing:8080/billing/webhooks/mercadopago",
+		BaseURL:           "http://localhost:8080/api",
+		POSExternalID:     "OFICINAMATRIZPOS01",
 		PaymentExpiration: 48 * time.Hour,
 		WebhookSecret:     webhookSecret,
 	}, nil)
@@ -193,12 +222,26 @@ func (f *fixture) pendingPayment() (Quote, Payment) {
 	return q, q.Payments[0]
 }
 
-func (f *fixture) webhook(dataID string) error {
+func (f *fixture) webhook(orderID string) error {
 	requestID := uuid.NewString()
 	return f.svc.HandleWebhook(context.Background(), Notification{
-		DataID: dataID, Type: "payment", RequestID: requestID,
-		Signature: mercadopago.SignatureHeader(webhookSecret, dataID, requestID, "1700000000"),
+		DataID: orderID, Type: NotificationTypeOrder, RequestID: requestID,
+		Signature: mercadopago.SignatureHeader(webhookSecret, strings.ToLower(orderID), requestID, "1700000000"),
 	})
+}
+
+func (f *fixture) settle(orderID, status string) {
+	f.t.Helper()
+	f.gateway.setStatus(orderID, status)
+	require.NoError(f.t, f.webhook(orderID))
+}
+
+func (f *fixture) payment() Payment {
+	f.t.Helper()
+	q, err := f.svc.QuoteByWorkOrder(context.Background(), f.wo)
+	require.NoError(f.t, err)
+	require.NotEmpty(f.t, q.Payments)
+	return q.Payments[len(q.Payments)-1]
 }
 
 func (f *fixture) outbox() []messaging.Envelope {
