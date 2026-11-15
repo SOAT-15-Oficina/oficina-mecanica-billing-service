@@ -151,3 +151,24 @@ func TestWebhookIgnoresWhatItCannotUse(t *testing.T) {
 	f.gateway.getErr = errBoom
 	assert.ErrorIs(t, f.webhook(p.ProviderOrderID), errBoom)
 }
+
+func TestWebhookConfirmsPaymentProcessedWhileTheQuoteWasCanceled(t *testing.T) {
+	f := newFixture(t)
+	_, p := f.pendingPayment()
+	f.gateway.setStatus(p.ProviderOrderID, mercadopago.OrderProcessed)
+	f.handle(messaging.TypeCancelQuote, messaging.CancelQuote{Reason: messaging.ReasonExpired})
+	require.Equal(t, PaymentExpired, f.payment().Status)
+
+	require.NoError(t, f.webhook(p.ProviderOrderID))
+	var confirmed messaging.PaymentConfirmed
+	f.last(messaging.TypePaymentConfirmed, &confirmed)
+	assert.Equal(t, p.ID, confirmed.PaymentID)
+	assert.Equal(t, PaymentApproved, f.payment().Status)
+
+	f.handle(messaging.TypeRefundPayment, messaging.RefundPayment{Reason: messaging.ReasonExpired})
+	require.Len(t, f.gateway.refunds, 1)
+	assert.Equal(t, PaymentRefunded, f.payment().Status)
+	var refunded messaging.PaymentRefunded
+	f.last(messaging.TypePaymentRefunded, &refunded)
+	assert.Equal(t, p.ID, refunded.PaymentID)
+}

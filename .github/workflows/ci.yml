@@ -268,6 +268,29 @@ jobs:
       - name: Configure kubectl
         run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME"
 
+      - name: Update provider credentials
+        env:
+          MERCADOPAGO_ACCESS_TOKEN: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}
+          MERCADOPAGO_WEBHOOK_SECRET: ${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}
+          SES_SENDER_EMAIL: ${{ vars.SES_SENDER_EMAIL }}
+        run: |
+          CURRENT="$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text | jq -cS .)"
+          UPDATED="$(jq -cS \
+            --arg token "$MERCADOPAGO_ACCESS_TOKEN" \
+            --arg hook "$MERCADOPAGO_WEBHOOK_SECRET" \
+            --arg sender "$SES_SENDER_EMAIL" '
+              (if $token != "" then .MERCADOPAGO_ACCESS_TOKEN = $token else . end)
+              | (if $hook != "" then .MERCADOPAGO_WEBHOOK_SECRET = $hook else . end)
+              | (if $sender != "" then .SES_SENDER_EMAIL = $sender else . end)' <<<"$CURRENT")"
+          if [ "$UPDATED" != "$CURRENT" ]; then
+            aws secretsmanager put-secret-value --secret-id "$SECRET_ARN" --secret-string "$UPDATED" >/dev/null
+            echo "Segredo do billing atualizado com os valores do GitHub Environment"
+          fi
+          MISSING="$(jq -r 'to_entries[] | select(.value == "CHANGE_ME") | .key' <<<"$UPDATED" | paste -sd, -)"
+          if [ -n "$MISSING" ]; then
+            echo "::warning::Ainda com CHANGE_ME no segredo do billing: ${MISSING}. Cadastre no GitHub Environment ${{ github.ref_name == 'hml' && 'homolog' || 'production' }} (veja o README)."
+          fi
+
       - name: Sync secrets
         run: |
           aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text \
@@ -329,3 +352,21 @@ jobs:
           done
           curl -sf http://127.0.0.1:18080/ping | grep -Fx Pong
           curl -sf "http://127.0.0.1:18080/billing/docs/swagger.yaml" | cmp - docs/swagger.yaml
+
+      - name: Webhook summary
+        env:
+          MERCADOPAGO_APP_ID: ${{ vars.MERCADOPAGO_APP_ID }}
+        run: |
+          PANEL="https://www.mercadopago.com.br/developers/panel/app"
+          [ -n "$MERCADOPAGO_APP_ID" ] && PANEL="${PANEL}/${MERCADOPAGO_APP_ID}/webhooks"
+          {
+            echo "### Webhook do Mercado Pago"
+            echo
+            echo "URL de producao do webhook (evento **Order (Mercado Pago)**):"
+            echo
+            echo '```'
+            echo "${PUBLIC_BASE_URL}/billing/webhooks/mercadopago"
+            echo '```'
+            echo
+            echo "O dominio do CloudFront muda a cada bring-up. Cole a URL em ${PANEL}."
+          } >> "$GITHUB_STEP_SUMMARY"
