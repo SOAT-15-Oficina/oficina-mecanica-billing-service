@@ -8,7 +8,11 @@ import (
 )
 
 func Manifest(dataID, requestID, ts string) string {
-	return "id:" + dataID + ";request-id:" + requestID + ";ts:" + ts + ";"
+	manifest := "id:" + dataID + ";"
+	if requestID != "" {
+		manifest += "request-id:" + requestID + ";"
+	}
+	return manifest + "ts:" + ts + ";"
 }
 
 func Sign(secret, dataID, requestID, ts string) string {
@@ -45,6 +49,11 @@ func VerifySignature(secret, header, dataID, requestID string) bool {
 	if err != nil {
 		return false
 	}
-	want, _ := hex.DecodeString(Sign(secret, dataID, requestID, ts))
-	return hmac.Equal(got, want)
+	for _, id := range []string{strings.ToLower(dataID), dataID} {
+		want, _ := hex.DecodeString(Sign(secret, id, requestID, ts))
+		if hmac.Equal(got, want) {
+			return true
+		}
+	}
+	return false
 }

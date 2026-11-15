@@ -30,9 +30,15 @@ func main() {
 		exit(err, "failed to load configuration")
 	}
 
-	if len(os.Args) > 1 && os.Args[1] == "migrate" {
-		migrate(cfg)
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "migrate":
+			migrate(cfg)
+			return
+		case "mp-setup":
+			mpSetup(cfg)
+			return
+		}
 	}
 	serve(cfg)
 }
@@ -48,6 +54,26 @@ func migrate(cfg *config.Config) {
 		exit(err, "failed to run migrations", observability.Integration(observability.IntegrationRDS))
 	}
 	slog.Info("migrations applied successfully")
+}
+
+func mpSetup(cfg *config.Config) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	client := mercadopago.NewClient(cfg.MercadoPago.BaseURL, cfg.MercadoPago.AccessToken, nil)
+	res, err := mercadopago.Setup(ctx, client, mercadopago.DefaultStoreExternalID, cfg.MercadoPago.POSExternalID)
+	if err != nil {
+		exit(err, "failed to set up mercado pago store and pos", observability.Integration(observability.IntegrationMercadoPago))
+	}
+	slog.Info("mercado pago store and pos ready",
+		slog.String("user_id", res.UserID),
+		slog.String("store_id", res.Store.ID.String()),
+		slog.String("store_external_id", res.Store.ExternalID),
+		slog.Bool("store_created", res.StoreCreated),
+		slog.String("pos_id", res.POS.ID.String()),
+		slog.String("pos_external_id", res.POS.ExternalID),
+		slog.Bool("pos_created", res.POSCreated),
+	)
 }
 
 func serve(cfg *config.Config) {
@@ -88,7 +114,8 @@ func serve(cfg *config.Config) {
 		billing.NewEmailNotifier(mailer, cfg.Server.BaseURL),
 		billing.Config{
 			EventsTopic:       cfg.Messaging.EventsTopicARN,
-			NotificationURL:   cfg.MercadoPago.NotificationURL,
+			BaseURL:           cfg.Server.BaseURL,
+			POSExternalID:     cfg.MercadoPago.POSExternalID,
 			PaymentExpiration: cfg.MercadoPago.PaymentExpiration,
 			WebhookSecret:     cfg.MercadoPago.WebhookSecret,
 		},

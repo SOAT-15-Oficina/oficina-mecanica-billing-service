@@ -39,7 +39,7 @@ type PaymentEmailData struct {
 	CustomerName  string
 	WorkOrderCode string
 	Amount        string
-	CheckoutURL   string
+	QRCodeURL     string
 	ExpiresAt     string
 }
 

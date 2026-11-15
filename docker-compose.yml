@@ -62,7 +62,8 @@ services:
       target: mpfake
     environment:
       PORT: "8095"
-      MPFAKE_PUBLIC_URL: ${MPFAKE_PUBLIC_URL}
+      MPFAKE_WEBHOOK_URL: http://api:${SERVER_PORT}/billing/webhooks/mercadopago
+      MERCADOPAGO_POS_EXTERNAL_ID: ${MERCADOPAGO_POS_EXTERNAL_ID:-OFICINAMATRIZPOS01}
       MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET}
     ports:
       - "${MPFAKE_HOST_PORT:-8095}:8095"

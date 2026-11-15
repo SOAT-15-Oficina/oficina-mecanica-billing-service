@@ -53,14 +53,18 @@ func TestEmailNotifierSendsQuoteWithPublicLinks(t *testing.T) {
 	}
 }
 
-func TestEmailNotifierSendsPaymentLink(t *testing.T) {
+func TestEmailNotifierSendsQRCodeLink(t *testing.T) {
 	provider := &recordingProvider{}
 	n := NewEmailNotifier(provider, "http://localhost:8080/api")
-	p := Payment{AmountCents: 15050, CheckoutURL: "http://mp/checkout/1", ExpiresAt: time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)}
+	paymentID := uuid.MustParse("0195a000-0000-7000-8000-000000000003")
+	link := NewLinks("http://localhost:8080/api/").PaymentQR(paymentID)
+	assert.Equal(t, "http://localhost:8080/api/billing/public/payments/0195a000-0000-7000-8000-000000000003/qr", link)
+	p := Payment{ID: paymentID, AmountCents: 15050, QRCodeURL: link, ExpiresAt: time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)}
 
 	require.NoError(t, n.PaymentReady(context.Background(), sampleQuote(), p))
 	require.Len(t, provider.sent, 1)
-	assert.Contains(t, provider.sent[0].Body, "http://mp/checkout/1")
+	assert.Contains(t, provider.sent[0].Body, link)
+	assert.Contains(t, provider.sent[0].Body, "QR Code")
 	assert.Contains(t, provider.sent[0].Body, "R$ 150,50")
 	assert.Contains(t, provider.sent[0].Body, "13/11/2026 10:00")
 }

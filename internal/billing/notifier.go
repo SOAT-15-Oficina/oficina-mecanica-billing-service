@@ -28,6 +28,10 @@ func (l Links) All(quoteID uuid.UUID, action string) string {
 	return fmt.Sprintf("%s/%s-all", l.Quote(quoteID), action)
 }
 
+func (l Links) PaymentQR(paymentID uuid.UUID) string {
+	return fmt.Sprintf("%s/billing/public/payments/%s/qr", l.baseURL, paymentID)
+}
+
 func (l Links) Page(quoteID uuid.UUID) string {
 	return fmt.Sprintf("%s/aprovacao.html?quote=%s", strings.TrimSuffix(l.baseURL, "/api"), quoteID)
 }
@@ -77,7 +81,7 @@ func (n *EmailNotifier) PaymentReady(ctx context.Context, q Quote, p Payment) er
 		CustomerName:  q.CustomerName,
 		WorkOrderCode: q.WorkOrderCode,
 		Amount:        FormatBRL(p.AmountCents),
-		CheckoutURL:   p.CheckoutURL,
+		QRCodeURL:     p.QRCodeURL,
 		ExpiresAt:     p.ExpiresAt.In(n.location).Format("02/01/2006 15:04"),
 	})
 	if err != nil {

@@ -45,8 +45,9 @@ type Payment struct {
 	ID                uuid.UUID  `json:"id"`
 	Status            string     `json:"status"`
 	AmountCents       int        `json:"amount_cents"`
-	PreferenceID      string     `json:"preference_id"`
-	CheckoutURL       string     `json:"checkout_url"`
+	ProviderOrderID   string     `json:"provider_order_id"`
+	QRCodeURL         string     `json:"qr_code_url"`
+	QRData            string     `json:"qr_data"`
 	ProviderPaymentID *string    `json:"provider_payment_id,omitempty"`
 	ProviderRefundID  *string    `json:"provider_refund_id,omitempty"`
 	FailureReason     *string    `json:"failure_reason,omitempty"`
@@ -76,17 +77,34 @@ type Quote struct {
 }
 
 type PublicQuote struct {
-	ID                 uuid.UUID  `json:"id"`
-	WorkOrderCode      string     `json:"work_order_code"`
-	CustomerName       string     `json:"customer_name"`
-	Status             string     `json:"status"`
-	TotalCents         int        `json:"total_cents"`
-	ApprovedTotalCents int        `json:"approved_total_cents"`
-	SupplyShortage     bool       `json:"supply_shortage"`
-	SentAt             time.Time  `json:"sent_at"`
-	DecidedAt          *time.Time `json:"decided_at,omitempty"`
-	Items              []Item     `json:"items"`
-	PaymentURL         string     `json:"payment_url,omitempty"`
+	ID                 uuid.UUID       `json:"id"`
+	WorkOrderCode      string          `json:"work_order_code"`
+	CustomerName       string          `json:"customer_name"`
+	Status             string          `json:"status"`
+	TotalCents         int             `json:"total_cents"`
+	ApprovedTotalCents int             `json:"approved_total_cents"`
+	SupplyShortage     bool            `json:"supply_shortage"`
+	SentAt             time.Time       `json:"sent_at"`
+	DecidedAt          *time.Time      `json:"decided_at,omitempty"`
+	Items              []Item          `json:"items"`
+	PaymentURL         string          `json:"payment_url,omitempty"`
+	Payments           []PublicPayment `json:"payments"`
+}
+
+type PublicPayment struct {
+	ID              uuid.UUID `json:"id"`
+	Status          string    `json:"status"`
+	AmountCents     int       `json:"amount_cents"`
+	ProviderOrderID string    `json:"provider_order_id"`
+	QRCodeURL       string    `json:"qr_code_url"`
+	QRData          string    `json:"qr_data"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type PaymentPage struct {
+	Payment       Payment
+	WorkOrderCode string
+	CustomerName  string
 }
 
 func (q Quote) Public() PublicQuote {
@@ -101,15 +119,22 @@ func (q Quote) Public() PublicQuote {
 		SentAt:             q.SentAt,
 		DecidedAt:          q.DecidedAt,
 		Items:              q.Items,
+		Payments:           make([]PublicPayment, 0, len(q.Payments)),
+	}
+	for _, p := range q.Payments {
+		out.Payments = append(out.Payments, PublicPayment{
+			ID: p.ID, Status: p.Status, AmountCents: p.AmountCents, ProviderOrderID: p.ProviderOrderID,
+			QRCodeURL: p.QRCodeURL, QRData: p.QRData, ExpiresAt: p.ExpiresAt,
+		})
 	}
 	if p := q.payment(PaymentPending); p != nil {
-		out.PaymentURL = p.CheckoutURL
+		out.PaymentURL = p.QRCodeURL
 	}
 	return out
 }
 
 func (q Quote) payment(statuses ...string) *Payment {
-	for i := range q.Payments {
+	for i := len(q.Payments) - 1; i >= 0; i-- {
 		for _, s := range statuses {
 			if q.Payments[i].Status == s {
 				return &q.Payments[i]
@@ -119,9 +144,9 @@ func (q Quote) payment(statuses ...string) *Payment {
 	return nil
 }
 
-func (q Quote) paymentByProviderID(id string) *Payment {
+func (q Quote) paymentByOrder(orderID string) *Payment {
 	for i := range q.Payments {
-		if p := q.Payments[i].ProviderPaymentID; p != nil && *p == id {
+		if q.Payments[i].ProviderOrderID == orderID {
 			return &q.Payments[i]
 		}
 	}

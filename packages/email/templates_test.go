@@ -30,10 +30,10 @@ func TestRenderQuoteEmail(t *testing.T) {
 func TestRenderPaymentEmail(t *testing.T) {
 	body, err := RenderPaymentEmail(PaymentEmailData{
 		CustomerName: "Maria", WorkOrderCode: "OS-1", Amount: "R$ 90,00",
-		CheckoutURL: "http://mp/checkout/pref", ExpiresAt: "13/11/2026 10:00",
+		QRCodeURL: "http://billing/qr", ExpiresAt: "13/11/2026 10:00",
 	})
 	require.NoError(t, err)
-	for _, want := range []string{"Maria", "OS-1", "R$ 90,00", "http://mp/checkout/pref", "13/11/2026 10:00"} {
+	for _, want := range []string{"Maria", "OS-1", "R$ 90,00", "http://billing/qr", "13/11/2026 10:00"} {
 		assert.Contains(t, body, want)
 	}
 }

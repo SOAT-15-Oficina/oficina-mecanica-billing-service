@@ -42,3 +42,19 @@ func TestVerifySignature(t *testing.T) {
 		})
 	}
 }
+
+func TestManifestOmitsMissingRequestID(t *testing.T) {
+	assert.Equal(t, "id:ordtst1;ts:1700000000;", Manifest("ordtst1", "", "1700000000"))
+}
+
+func TestVerifySignatureAcceptsLowercaseOrOriginalID(t *testing.T) {
+	lower := SignatureHeader("secret", "ordtst01abc", "req-1", "1700000000")
+	assert.True(t, VerifySignature("secret", lower, "ORDTST01ABC", "req-1"))
+
+	original := SignatureHeader("secret", "ORDTST01ABC", "req-1", "1700000000")
+	assert.True(t, VerifySignature("secret", original, "ORDTST01ABC", "req-1"))
+
+	withoutRequest := SignatureHeader("secret", "ordtst01abc", "", "1700000000")
+	assert.True(t, VerifySignature("secret", withoutRequest, "ORDTST01ABC", ""))
+	assert.False(t, VerifySignature("secret", withoutRequest, "ORDTST01ABC", "req-1"))
+}

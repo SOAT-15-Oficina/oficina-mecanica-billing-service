@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/mercadopago"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/messaging"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/messaging/pgoutbox"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/observability"
@@ -92,6 +93,12 @@ func (s *Service) cancelQuote(ctx context.Context, env messaging.Envelope) error
 	if reason == "" {
 		reason = messaging.ReasonSagaCompensation
 	}
+	if done, err := s.processed(ctx, env.MessageID); err != nil || done {
+		return err
+	}
+	if err := s.cancelPendingOrders(ctx, env); err != nil {
+		return err
+	}
 
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		fresh, err := pgoutbox.MarkProcessed(ctx, tx, env)
@@ -124,4 +131,33 @@ func (s *Service) cancelQuote(ctx context.Context, env messaging.Envelope) error
 
 		return s.emit(ctx, tx, env, messaging.TypeQuoteCanceled, messaging.QuoteCanceled{QuoteID: quoteID})
 	})
+}
+
+func (s *Service) cancelPendingOrders(ctx context.Context, env messaging.Envelope) error {
+	q, err := quoteByWorkOrder(ctx, s.db, env.WorkOrderID, false)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, p := range q.Payments {
+		if p.Status != PaymentPending {
+			continue
+		}
+		key := uuid.NewSHA1(env.MessageID, []byte(p.ProviderOrderID)).String()
+		logger := s.log(env).With(slog.String(observability.KeyPaymentID, p.ID.String()), slog.String("provider_order_id", p.ProviderOrderID),
+			observability.Integration(observability.IntegrationMercadoPago))
+		err := s.gateway.CancelOrder(ctx, p.ProviderOrderID, key)
+		switch {
+		case errors.Is(err, mercadopago.ErrNotFound):
+			logger.WarnContext(ctx, "billing: qr order not found on cancel", observability.Event("billing.order_not_found"))
+		case err != nil:
+			logger.ErrorContext(ctx, "billing: cancel qr order failed", observability.Err(err))
+			return err
+		default:
+			logger.InfoContext(ctx, "billing: qr order canceled", observability.Event("billing.order_canceled"))
+		}
+	}
+	return nil
 }

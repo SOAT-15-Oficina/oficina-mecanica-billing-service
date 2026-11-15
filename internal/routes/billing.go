@@ -17,6 +17,7 @@ type Billing interface {
 	DecideItem(ctx context.Context, quoteID, workOrderServiceID uuid.UUID, decision, correlationID string) (billing.PublicQuote, error)
 	DecideAll(ctx context.Context, quoteID uuid.UUID, decision, correlationID string) (billing.PublicQuote, error)
 	HandleWebhook(ctx context.Context, n billing.Notification) error
+	PaymentPage(ctx context.Context, paymentID uuid.UUID) (billing.PaymentPage, error)
 }
 
 type billingHandler struct {
@@ -34,6 +35,10 @@ func registerBilling(group fiber.Router, svc Billing, authenticate, authorize fi
 	public.Get("/:quoteId/items/:workOrderServiceId/reject", h.decideItem(billing.ItemRejected))
 	public.Get("/:quoteId/approve-all", h.decideAll(billing.ItemApproved))
 	public.Get("/:quoteId/reject-all", h.decideAll(billing.ItemRejected))
+
+	payments := group.Group("/public/payments")
+	payments.Get("/:paymentId/qr", h.qrHTML)
+	payments.Get("/:paymentId/qr.png", h.qrPNG)
 
 	group.Post("/webhooks/mercadopago", h.webhook)
 }

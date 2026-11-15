@@ -6,76 +6,148 @@ import (
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/mercadopago"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/internal/messaging"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestWebhookConfirmsApprovedPayment(t *testing.T) {
+func TestWebhookConfirmsProcessedOrder(t *testing.T) {
 	f := newFixture(t)
-	q, p := f.pendingPayment()
-	providerID := f.gateway.addPayment(mercadopago.StatusApproved, q.ID.String())
+	_, p := f.pendingPayment()
 
-	require.NoError(t, f.webhook(providerID))
+	f.settle(p.ProviderOrderID, mercadopago.OrderProcessed)
 
 	var confirmed messaging.PaymentConfirmed
 	out := f.last(messaging.TypePaymentConfirmed, &confirmed)
 	assert.Equal(t, p.ID, confirmed.PaymentID)
-	assert.Equal(t, providerID, confirmed.ProviderPaymentID)
+	payID := f.gateway.paymentID(p.ProviderOrderID)
+	assert.Regexp(t, "^PAY", payID)
+	assert.Equal(t, payID, confirmed.ProviderPaymentID)
 	assert.Equal(t, 15050, confirmed.AmountCents)
 	assert.Equal(t, f.sagaID, out.SagaID)
 
-	q, err := f.svc.QuoteByWorkOrder(context.Background(), f.wo)
-	require.NoError(t, err)
-	assert.Equal(t, PaymentApproved, q.Payments[0].Status)
-	require.NotNil(t, q.Payments[0].ProviderPaymentID)
-	assert.Equal(t, providerID, *q.Payments[0].ProviderPaymentID)
+	got := f.payment()
+	assert.Equal(t, PaymentApproved, got.Status)
+	require.NotNil(t, got.ProviderPaymentID)
+	assert.Equal(t, payID, *got.ProviderPaymentID)
+	assert.NotNil(t, got.ConfirmedAt)
 
 	count := len(f.outbox())
-	require.NoError(t, f.webhook(providerID))
+	require.NoError(t, f.webhook(p.ProviderOrderID))
+	f.settle(p.ProviderOrderID, mercadopago.OrderExpired)
+	f.settle(p.ProviderOrderID, mercadopago.OrderCanceled)
 	assert.Len(t, f.outbox(), count)
-
-	other := f.gateway.addPayment(mercadopago.StatusApproved, q.ID.String())
-	require.NoError(t, f.webhook(other))
-	assert.Len(t, f.outbox(), count)
+	assert.Equal(t, PaymentApproved, f.payment().Status)
 }
 
-func TestWebhookDeclinesRejectedPayment(t *testing.T) {
-	for _, status := range []string{mercadopago.StatusRejected, mercadopago.StatusCancelled} {
-		t.Run(status, func(t *testing.T) {
+func TestWebhookFailsExpiredAndCanceledOrders(t *testing.T) {
+	cases := map[string]struct{ status, reason string }{
+		mercadopago.OrderExpired:  {PaymentExpired, messaging.ReasonExpired},
+		mercadopago.OrderCanceled: {PaymentDeclined, messaging.ReasonDeclined},
+	}
+	for orderStatus, want := range cases {
+		t.Run(orderStatus, func(t *testing.T) {
 			f := newFixture(t)
-			q, p := f.pendingPayment()
+			_, p := f.pendingPayment()
 
-			require.NoError(t, f.webhook(f.gateway.addPayment(status, q.ID.String())))
+			f.settle(p.ProviderOrderID, orderStatus)
 
 			var failed messaging.PaymentFailed
 			f.last(messaging.TypePaymentFailed, &failed)
 			assert.Equal(t, p.ID, failed.PaymentID)
-			assert.Equal(t, messaging.ReasonDeclined, failed.Reason)
+			assert.Equal(t, want.reason, failed.Reason)
 
-			q, err := f.svc.QuoteByWorkOrder(context.Background(), f.wo)
-			require.NoError(t, err)
-			assert.Equal(t, PaymentDeclined, q.Payments[0].Status)
+			got := f.payment()
+			assert.Equal(t, want.status, got.Status)
+			require.NotNil(t, got.FailureReason)
+			assert.Equal(t, want.reason, *got.FailureReason)
+
+			count := len(f.outbox())
+			require.NoError(t, f.webhook(p.ProviderOrderID))
+			assert.Len(t, f.outbox(), count)
 		})
 	}
 }
 
-func TestWebhookIgnoresWhatItCannotUse(t *testing.T) {
+func TestWebhookCanceledByUsIsIgnored(t *testing.T) {
 	f := newFixture(t)
-	q, _ := f.pendingPayment()
+	_, p := f.pendingPayment()
+	f.handle(messaging.TypeCancelQuote, messaging.CancelQuote{Reason: messaging.ReasonExpired})
 	count := len(f.outbox())
 
-	err := f.svc.HandleWebhook(context.Background(), Notification{DataID: "1", Type: "payment", RequestID: "r", Signature: "ts=1,v1=00"})
-	assert.ErrorIs(t, err, ErrInvalidSignature)
+	f.settle(p.ProviderOrderID, mercadopago.OrderCanceled)
+	assert.Len(t, f.outbox(), count)
+	assert.Equal(t, PaymentExpired, f.payment().Status)
+}
 
-	sig := mercadopago.SignatureHeader(webhookSecret, "1", "r", "1")
-	require.NoError(t, f.svc.HandleWebhook(context.Background(), Notification{DataID: "1", Type: "merchant_order", RequestID: "r", Signature: sig}))
+func TestWebhookRefundedOrderMarksPaymentWithoutEvent(t *testing.T) {
+	f := newFixture(t)
+	_, p := f.pendingPayment()
+	f.settle(p.ProviderOrderID, mercadopago.OrderProcessed)
+	count := len(f.outbox())
 
-	require.NoError(t, f.webhook(f.gateway.addPayment("in_process", q.ID.String())))
-	require.NoError(t, f.webhook(f.gateway.addPayment(mercadopago.StatusApproved, "not-a-uuid")))
-	require.NoError(t, f.webhook(f.gateway.addPayment(mercadopago.StatusApproved, uuid.NewString())))
+	f.settle(p.ProviderOrderID, mercadopago.OrderRefunded)
+	assert.Len(t, f.outbox(), count)
+	got := f.payment()
+	assert.Equal(t, PaymentRefunded, got.Status)
+	require.NotNil(t, got.ProviderRefundID)
+	assert.Equal(t, "REF-WEBHOOK", *got.ProviderRefundID)
+	assert.NotNil(t, got.RefundedAt)
+
+	require.NoError(t, f.webhook(p.ProviderOrderID))
 	assert.Len(t, f.outbox(), count)
 
-	f.gateway.paymentErr = errBoom
-	assert.ErrorIs(t, f.webhook("123"), errBoom)
+	env := f.handle(messaging.TypeRefundPayment, messaging.RefundPayment{})
+	assert.Empty(t, f.gateway.refunds)
+	var refunded messaging.PaymentRefunded
+	f.last(messaging.TypePaymentRefunded, &refunded)
+	assert.Equal(t, p.ID, refunded.PaymentID)
+	assert.Equal(t, "REF-WEBHOOK", refunded.ProviderRefundID)
+	assert.True(t, f.isProcessed(env.MessageID))
+}
+
+func TestWebhookSignature(t *testing.T) {
+	f := newFixture(t)
+	_, p := f.pendingPayment()
+	f.gateway.setStatus(p.ProviderOrderID, mercadopago.OrderProcessed)
+
+	err := f.svc.HandleWebhook(context.Background(), Notification{
+		DataID: p.ProviderOrderID, Type: NotificationTypeOrder, RequestID: "r", Signature: "ts=1,v1=00",
+	})
+	assert.ErrorIs(t, err, ErrInvalidSignature)
+
+	err = f.svc.HandleWebhook(context.Background(), Notification{
+		DataID: p.ProviderOrderID, Type: NotificationTypeOrder, RequestID: "r",
+		Signature: mercadopago.SignatureHeader("outro-segredo", p.ProviderOrderID, "r", "1"),
+	})
+	assert.ErrorIs(t, err, ErrInvalidSignature)
+	assert.Equal(t, PaymentPending, f.payment().Status)
+
+	require.NoError(t, f.svc.HandleWebhook(context.Background(), Notification{
+		DataID: p.ProviderOrderID, Type: NotificationTypeOrder,
+		Signature: mercadopago.SignatureHeader(webhookSecret, p.ProviderOrderID, "", "1"),
+	}))
+	assert.Equal(t, PaymentApproved, f.payment().Status)
+}
+
+func TestWebhookIgnoresWhatItCannotUse(t *testing.T) {
+	f := newFixture(t)
+	_, p := f.pendingPayment()
+	count := len(f.outbox())
+
+	sig := mercadopago.SignatureHeader(webhookSecret, "1", "r", "1")
+	require.NoError(t, f.svc.HandleWebhook(context.Background(), Notification{DataID: "1", Type: "payment", RequestID: "r", Signature: sig}))
+
+	require.NoError(t, f.webhook(p.ProviderOrderID))
+
+	other, err := f.gateway.CreateQROrder(context.Background(), mercadopago.QROrder{ExternalReference: "x"}, "k")
+	require.NoError(t, err)
+	f.settle(other.ID, mercadopago.OrderProcessed)
+
+	f.gateway.setStatus(p.ProviderOrderID, "action_required")
+	require.NoError(t, f.webhook(p.ProviderOrderID))
+	assert.Len(t, f.outbox(), count)
+	assert.Equal(t, PaymentPending, f.payment().Status)
+
+	f.gateway.getErr = errBoom
+	assert.ErrorIs(t, f.webhook(p.ProviderOrderID), errBoom)
 }

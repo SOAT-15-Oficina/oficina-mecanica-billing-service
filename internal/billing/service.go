@@ -15,9 +15,10 @@ import (
 )
 
 type Gateway interface {
-	CreatePreference(ctx context.Context, req mercadopago.PreferenceRequest) (mercadopago.Preference, error)
-	GetPayment(ctx context.Context, id string) (mercadopago.Payment, error)
-	Refund(ctx context.Context, paymentID, idempotencyKey string) (mercadopago.Refund, error)
+	CreateQROrder(ctx context.Context, order mercadopago.QROrder, idempotencyKey string) (mercadopago.Order, error)
+	GetOrder(ctx context.Context, id string) (mercadopago.Order, error)
+	CancelOrder(ctx context.Context, id, idempotencyKey string) error
+	RefundOrder(ctx context.Context, id, idempotencyKey string) (mercadopago.Order, error)
 }
 
 type Notifier interface {
@@ -27,7 +28,8 @@ type Notifier interface {
 
 type Config struct {
 	EventsTopic       string
-	NotificationURL   string
+	BaseURL           string
+	POSExternalID     string
 	PaymentExpiration time.Duration
 	WebhookSecret     string
 }
@@ -37,6 +39,7 @@ type Service struct {
 	gateway  Gateway
 	notifier Notifier
 	cfg      Config
+	links    Links
 	logger   *slog.Logger
 	now      func() time.Time
 }
@@ -50,6 +53,7 @@ func NewService(db DB, gateway Gateway, notifier Notifier, cfg Config, logger *s
 		gateway:  gateway,
 		notifier: notifier,
 		cfg:      cfg,
+		links:    NewLinks(cfg.BaseURL),
 		logger:   logger,
 		now:      func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) },
 	}
