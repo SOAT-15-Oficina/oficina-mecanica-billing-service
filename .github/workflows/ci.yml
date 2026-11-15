@@ -313,6 +313,9 @@ jobs:
           kubectl -n "$KUBE_NAMESPACE" wait --for=condition=complete "job/$JOB" --timeout=300s \
             || { kubectl -n "$KUBE_NAMESPACE" logs "job/$JOB" --tail=200; exit 1; }
 
+      - name: Restart pods to reload secrets
+        run: kubectl -n "$KUBE_NAMESPACE" rollout restart "deployment/${SERVICE}"
+
       - name: Wait for rollout
         run: kubectl -n "$KUBE_NAMESPACE" rollout status "deployment/${SERVICE}" --timeout=300s
 
