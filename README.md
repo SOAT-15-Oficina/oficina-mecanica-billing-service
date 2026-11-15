@@ -268,10 +268,16 @@ a ponta, com o próprio cliente.
 | PR para `main` ou `hml` | `lint` (actionlint, redocly, terraform validate, kubeconform), `test` (cobertura ≥ 80%), `quality` (SonarQube) |
 | push em `hml` | deploy em homologação |
 | push em `main` | deploy em produção |
+| `destroy.yml` (manual, na branch do ambiente) | remove os objetos do `k8s/` (se o cluster existir) e roda `terraform destroy` em `infra/` |
 
 O deploy aplica `infra/`, publica a imagem no ECR, sincroniza o segredo do
 Secrets Manager para o cluster, aplica `k8s/overlays/<ambiente>`, roda as
 migrations num Job e confere `/ping` e o contrato servido.
+
+O `destroy.yml` é disparado pelo `tear-down.yml` do `-infrastructure`, depois
+do OS Service (que assina o tópico deste serviço) e antes do destroy da
+plataforma. A branch escolhe o ambiente, como no deploy; com o state vazio ele
+não faz nada.
 
 ## Contrato
 
