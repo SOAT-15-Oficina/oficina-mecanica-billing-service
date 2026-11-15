@@ -89,9 +89,13 @@ func (s *Service) HandleWebhook(ctx context.Context, n Notification) error {
 }
 
 func (s *Service) confirm(ctx context.Context, u orderUpdate) error {
-	if u.pay.Status != PaymentPending {
+	late := u.pay.Status == PaymentExpired || u.pay.Status == PaymentDeclined
+	if u.pay.Status != PaymentPending && !late {
 		u.logger.InfoContext(ctx, "billing: order already settled", observability.Event("billing.webhook_duplicated"))
 		return nil
+	}
+	if late {
+		u.logger.WarnContext(ctx, "billing: payment confirmed after the payment was abandoned", observability.Event("billing.payment_confirmed_late"))
 	}
 	providerPaymentID := u.order.PaymentID()
 	if err := exec(ctx, u.tx, "confirm payment",

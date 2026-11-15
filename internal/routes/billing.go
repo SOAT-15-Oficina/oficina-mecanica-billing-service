@@ -133,7 +133,7 @@ func failure(c fiber.Ctx, err error, notFound string) error {
 	case errors.Is(err, billing.ErrNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": notFound})
 	case errors.Is(err, billing.ErrConflict):
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "quote or item already decided or canceled"})
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "orçamento ou item já decidido ou cancelado"})
 	case errors.Is(err, billing.ErrInvalidDecision):
 		return badRequest(c, "invalid decision")
 	}

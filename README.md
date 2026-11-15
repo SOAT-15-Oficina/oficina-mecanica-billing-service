@@ -66,6 +66,7 @@ sequenceDiagram
 | cliente decide o último item pendente, com ao menos um aprovado | `billing.quote-approved` (itens aprovados, reprovados e total aprovado) |
 | cliente decide o último item pendente, todos reprovados | `billing.quote-rejected` (`CLIENTE`) |
 | webhook com order `processed` | `billing.payment-confirmed` (`provider_payment_id` = id `PAY...` da transação) |
+| webhook com order `processed` para pagamento já `EXPIRADO` ou `RECUSADO` (o cliente pagou enquanto a OS era cancelada) | `billing.payment-confirmed` mesmo assim; a Saga responde com `billing.refund-payment` |
 | webhook com order `expired` | `billing.payment-failed` (`EXPIRADO`) |
 | webhook com order `canceled` que o Billing não pediu (pagamento ainda `PENDENTE`) | `billing.payment-failed` (`RECUSADO`) |
 | webhook com order `refunded` | nenhum; só garante o pagamento `ESTORNADO` |
@@ -217,6 +218,34 @@ em **Webhooks > Configurar notificações** da aplicação:
    sem esse evento marcado o webhook nunca chega.
 3. Copie a **assinatura secreta** gerada para `MERCADOPAGO_WEBHOOK_SECRET`.
 
+### Credenciais em cada bring-up
+
+O Terraform cria o segredo `oficina-mecanica/<ambiente>/billing-service` com
+`CHANGE_ME` e não volta a mexer nele. O passo **Update provider credentials**
+do deploy grava por cima, a cada execução, o que estiver no GitHub Environment
+do repositório (`homolog` para `hml`, `production` para `main`):
+
+| Nome | Tipo | Vai para |
+|---|---|---|
+| `MERCADOPAGO_ACCESS_TOKEN` | secret | access token da aplicação (`APP_USR-...` da conta de teste) |
+| `MERCADOPAGO_WEBHOOK_SECRET` | secret | assinatura secreta do webhook |
+| `SES_SENDER_EMAIL` | variable | remetente verificado no SES |
+| `MERCADOPAGO_APP_ID` | variable | só monta o link do painel no resumo do deploy |
+
+Para trocar uma credencial, atualize o Environment e rode o `ci.yml` do
+ambiente (ou o bring-up); não é preciso editar o Secrets Manager:
+
+```bash
+gh secret set MERCADOPAGO_ACCESS_TOKEN   --env homolog -R SOAT-15-Oficina/oficina-mecanica-billing-service
+gh secret set MERCADOPAGO_WEBHOOK_SECRET --env homolog -R SOAT-15-Oficina/oficina-mecanica-billing-service
+gh variable set SES_SENDER_EMAIL --env homolog --body voce@exemplo.com -R SOAT-15-Oficina/oficina-mecanica-billing-service
+```
+
+Se algum campo continuar `CHANGE_ME`, o deploy avisa com um *warning*. O
+resumo do deploy traz a URL do webhook com o domínio novo do CloudFront e o
+link direto para a tela de webhooks da aplicação: esse é o único passo que
+continua manual, porque o Mercado Pago só aceita o cadastro pelo painel.
+
 O Mercado Pago espera 200 em até 22 s e reenvia a cada 15 min; falha ao
 consultar a order responde 500 justamente para ele reenviar.
 
@@ -342,6 +371,12 @@ a ponta, com o próprio cliente.
 | `internal/routes/middlewares` | 96,0% |
 | `packages/email` | 98,8% |
 | **total (métrica do gate)** | **95,3%** |
+
+**Evidência no CI:** [execução do PR #4 para
+`hml`](https://github.com/SOAT-15-Oficina/oficina-mecanica-billing-service/actions/runs/43690075150).
+A aba *Summary* mostra o resumo do SonarQube publicado pelo job `quality`:
+Quality Gate, cobertura, bugs, vulnerabilidades e duplicação. O job `test` da
+mesma execução imprime a cobertura do `scripts/coverage-gate.sh`.
 
 ## Pipeline
 
